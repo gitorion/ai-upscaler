@@ -1,10 +1,10 @@
 # AI Video Upscaler
 
-AI-powered video upscaling for Debian and Ubuntu with NVIDIA GPU acceleration. Built around the spandrel model loader with a focus on live-action content — low resolution, compressed, noisy, and artifact-heavy sources.
+AI-powered video upscaling for Ubuntu with NVIDIA GPU acceleration. Built around the spandrel model loader with a focus on live-action content — low resolution, compressed, noisy, and artifact-heavy sources.
 
 ## System Requirements
 
-- OS: Debian 12 / Ubuntu 24.04 LTS
+- OS: Ubuntu 24.04 LTS
 - GPU: NVIDIA GPU with CUDA support (8GB+ VRAM recommended, 16GB for 4K)
 - RAM: 2GB minimum, 4GB+ recommended
 - Storage: 20GB+ free for models and temp files (500GB+ for 24fps 2hour video temp frames)
