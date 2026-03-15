@@ -24,10 +24,10 @@ VENV_DIR="$SCRIPT_DIR/venv"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TILE_SIZE=512
-TILE_PAD=32
+TILE_PAD=64
 MODEL_KEY="nomos8k"
 QUALITY="high"
-PREFILTER="medium"
+PREFILTER="light"
 DEINTERLACE=false
 RESUME=false
 SHARPEN=false
@@ -72,10 +72,10 @@ Model selection:
                               hat        HAT-L transformer — highest fidelity, clean sources only
 
 Pre-processing (applied before AI upscaling to clean degraded sources):
-  --prefilter LEVEL         none, light, medium (default), heavy
-                              none       No filtering — raw input to upscaler
-                              light      Mild temporal denoise
-                              medium     Denoise + deblock (recommended for compressed sources)
+  --prefilter LEVEL         none, light (default), medium, heavy
+                              none       No filtering — use for clean/high-quality sources
+                              light      Mild temporal denoise (default — safe for most content)
+                              medium     Denoise + deblock (for visibly compressed/blocky sources)
                               heavy      Strong denoise + deblock + deringing
   --deinterlace             Deinterlace source (for interlaced TV captures etc.)
 
@@ -87,8 +87,8 @@ Output:
 Performance / quality:
   -t, --tile SIZE           Tile size for GPU processing (default: 512)
                             Reduce on low VRAM: 256, 128
-  --tile-pad SIZE           Tile overlap padding in pixels (default: 32)
-                            Increase to reduce seam artifacts
+  --tile-pad SIZE           Tile overlap padding in pixels (default: 64)
+                            Increase to reduce seam artifacts; decrease to save VRAM
   --full-precision          Use float32 instead of float16 (marginal quality gain, uses more VRAM)
 
 Workflow:
@@ -172,11 +172,15 @@ get_video_info() {
     TOTAL_FRAMES=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$f")
     INPUT_CODEC=$(ffprobe  -v error -select_streams v:0 -show_entries stream=codec_name       -of csv=p=0 "$f")
 
+    # SAR / DAR — needed for correct output width on anamorphic (non-square pixel) sources
+    INPUT_SAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio  -of csv=p=0 "$f" 2>/dev/null || echo "")
+    INPUT_DAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=display_aspect_ratio -of csv=p=0 "$f" 2>/dev/null || echo "")
+
     local audio_stream
     audio_stream=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "$f" 2>/dev/null || true)
     HAS_AUDIO=$([[ -n "$audio_stream" ]] && echo true || echo false)
 
-    print_info "Input: ${INPUT_WIDTH}x${INPUT_HEIGHT}  ${INPUT_FPS}fps  ${DURATION}s  ${TOTAL_FRAMES} frames  codec:${INPUT_CODEC}  audio:${HAS_AUDIO}"
+    print_info "Input: ${INPUT_WIDTH}x${INPUT_HEIGHT}  SAR:${INPUT_SAR:-1:1}  DAR:${INPUT_DAR:-N/A}  ${INPUT_FPS}fps  ${DURATION}s  ${TOTAL_FRAMES} frames  codec:${INPUT_CODEC}  audio:${HAS_AUDIO}"
 }
 
 calculate_scale() {
@@ -202,12 +206,31 @@ calculate_scale() {
         USE_AI=true
     fi
 
-    OUTPUT_HEIGHT=$TARGET_HEIGHT
-    OUTPUT_WIDTH=$(echo "$INPUT_WIDTH * $TARGET_HEIGHT / $INPUT_HEIGHT" | bc | cut -d. -f1)
-    OUTPUT_WIDTH=$(( (OUTPUT_WIDTH / 2) * 2 ))
-    OUTPUT_HEIGHT=$(( (OUTPUT_HEIGHT / 2) * 2 ))
+    OUTPUT_HEIGHT=$(( (TARGET_HEIGHT / 2) * 2 ))
 
-    print_info "Scale factor: ${SCALE_FACTOR}x  →  Output: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}"
+    # Use DAR (display aspect ratio) for output width when available.
+    # This preserves the correct shape for anamorphic sources — e.g. SD DVD content
+    # stored as 720x480 (3:2 pixels) but intended to display as 4:3 (SAR 8:9).
+    # For square-pixel sources (SAR 1:1) DAR equals the pixel ratio, so the result
+    # is identical to the old calculation.
+    local dar_note=""
+    local dar_w dar_h
+    if [[ -n "$INPUT_DAR" && "$INPUT_DAR" != "N/A" && "$INPUT_DAR" != "0:1" ]]; then
+        dar_w=$(echo "$INPUT_DAR" | cut -d: -f1)
+        dar_h=$(echo "$INPUT_DAR" | cut -d: -f2)
+        if [[ -n "$dar_w" && -n "$dar_h" && "$dar_h" -gt 0 ]]; then
+            OUTPUT_WIDTH=$(echo "$OUTPUT_HEIGHT * $dar_w / $dar_h" | bc | cut -d. -f1)
+            OUTPUT_WIDTH=$(( (OUTPUT_WIDTH / 2) * 2 ))
+            dar_note="  (DAR ${INPUT_DAR})"
+        fi
+    fi
+
+    if [[ -z "$dar_note" ]]; then
+        OUTPUT_WIDTH=$(echo "$INPUT_WIDTH * $TARGET_HEIGHT / $INPUT_HEIGHT" | bc | cut -d. -f1)
+        OUTPUT_WIDTH=$(( (OUTPUT_WIDTH / 2) * 2 ))
+    fi
+
+    print_info "Scale factor: ${SCALE_FACTOR}x  →  Output: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}${dar_note}"
 }
 
 select_model() {
@@ -308,6 +331,8 @@ write_python_script() {
 import sys
 import os
 import math
+import threading
+import queue
 import cv2
 import torch
 import torch.nn.functional as F
@@ -323,9 +348,19 @@ except ImportError:
 
 from spandrel import ImageModelDescriptor, ModelLoader
 
-# Transformer models (HAT, SwinIR) require input dimensions to be a multiple of
-# their window size. 64 is a safe LCM for all supported architectures.
+# Allow cuDNN to benchmark and select the fastest convolution algorithm for
+# the actual tile dimensions in use. Pays off quickly on video — all frames
+# share the same tile sizes, so the benchmark runs only once per shape.
+torch.backends.cudnn.benchmark = True
+
+# Transformer models (HAT, SwinIR) require input H/W to be a multiple of their
+# window size. 64 is a safe LCM covering all supported architectures.
 WINDOW_MULTIPLE = 64
+
+# Pipeline queue depths — tune if you hit OOM or want more IO/GPU overlap.
+# Each slot in read_q holds one raw decoded frame; write_q holds one upscaled frame.
+READER_QUEUE_DEPTH = 8
+WRITER_QUEUE_DEPTH = 16
 
 
 def pad_to_multiple(tensor, multiple):
@@ -335,38 +370,48 @@ def pad_to_multiple(tensor, multiple):
     pad_w = (multiple - w % multiple) % multiple
     if pad_h == 0 and pad_w == 0:
         return tensor, 0, 0
-    padded = F.pad(tensor, (0, pad_w, 0, pad_h), mode='reflect')
-    return padded, pad_w, pad_h
+    return F.pad(tensor, (0, pad_w, 0, pad_h), mode='reflect'), pad_w, pad_h
 
 
 def frame_to_tensor(frame, device, use_half):
     """Convert cv2 BGR uint8 HWC frame to NCHW float [0,1] tensor on device."""
     img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    t = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(device)
+    t = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
     if use_half:
         t = t.half()
-    return t
+    # non_blocking=True enables async host→device DMA when the source tensor
+    # is in pinned memory — harmless no-op otherwise.
+    return t.to(device, non_blocking=True)
 
 
 def tensor_to_frame(t):
     """Convert NCHW float [0,1] tensor to cv2 BGR uint8 HWC frame."""
     out = t.squeeze(0).float().cpu().clamp(0, 1)
-    out = (out.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
-    return cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    return cv2.cvtColor(
+        (out.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8),
+        cv2.COLOR_RGB2BGR,
+    )
 
 
 def tile_process(model, img_tensor, model_scale, tile_size, tile_pad):
     """
     Tile-based inference with per-tile WINDOW_MULTIPLE alignment padding.
 
-    Tiles are padded with tile_pad pixels of context on each side for better
-    edge quality, then further padded to WINDOW_MULTIPLE for transformer model
+    Each tile borrows tile_pad pixels of context from its neighbours for better
+    edge quality, then is further padded to WINDOW_MULTIPLE for transformer
     compatibility (harmless no-op for RRDBNet-based models).
+
+    The accumulation buffer stays on the GPU — a single CPU transfer happens
+    at the end in tensor_to_frame(), instead of one per tile.
     """
     batch, channel, height, width = img_tensor.shape
-    # Accumulate in float32 regardless of inference dtype
-    output = torch.zeros(batch, channel, height * model_scale, width * model_scale,
-                         dtype=torch.float32)
+    device = img_tensor.device
+
+    # Keep output on GPU to avoid per-tile round-trips
+    output = torch.zeros(
+        batch, channel, height * model_scale, width * model_scale,
+        dtype=torch.float32, device=device,
+    )
 
     tiles_x = math.ceil(width  / tile_size)
     tiles_y = math.ceil(height / tile_size)
@@ -374,35 +419,31 @@ def tile_process(model, img_tensor, model_scale, tile_size, tile_pad):
     for tile_y in range(tiles_y):
         for tile_x in range(tiles_x):
             # Core tile bounds (no padding)
-            x0 = tile_x * tile_size
-            x1 = min(x0 + tile_size, width)
-            y0 = tile_y * tile_size
-            y1 = min(y0 + tile_size, height)
+            x0 = tile_x * tile_size;  x1 = min(x0 + tile_size, width)
+            y0 = tile_y * tile_size;  y1 = min(y0 + tile_size, height)
 
             # Expanded bounds with tile_pad context for better edge quality
-            x0p = max(x0 - tile_pad, 0)
-            x1p = min(x1 + tile_pad, width)
-            y0p = max(y0 - tile_pad, 0)
-            y1p = min(y1 + tile_pad, height)
+            x0p = max(x0 - tile_pad, 0);  x1p = min(x1 + tile_pad, width)
+            y0p = max(y0 - tile_pad, 0);  y1p = min(y1 + tile_pad, height)
 
             tile_in = img_tensor[:, :, y0p:y1p, x0p:x1p]
-
-            # Pad to WINDOW_MULTIPLE for transformer model compatibility
             tile_in, pw, ph = pad_to_multiple(tile_in, WINDOW_MULTIPLE)
 
             with torch.no_grad():
                 tile_out = model(tile_in).float()
 
             # Strip WINDOW_MULTIPLE padding from output
-            h_content = tile_out.shape[2] - ph * model_scale
-            w_content = tile_out.shape[3] - pw * model_scale
-            tile_out = tile_out[:, :, :h_content, :w_content]
+            tile_out = tile_out[
+                :, :,
+                : tile_out.shape[2] - ph * model_scale,
+                : tile_out.shape[3] - pw * model_scale,
+            ]
 
-            # Extract only the core (non-tile_pad) region and place in output
-            off_x   = (x0 - x0p) * model_scale
-            off_y   = (y0 - y0p) * model_scale
-            w_tile  = (x1 - x0)  * model_scale
-            h_tile  = (y1 - y0)  * model_scale
+            # Place only the core (non-tile_pad) region into the accumulation buffer
+            off_x  = (x0  - x0p) * model_scale
+            off_y  = (y0  - y0p) * model_scale
+            w_tile = (x1  - x0)  * model_scale
+            h_tile = (y1  - y0)  * model_scale
 
             output[
                 :, :,
@@ -414,7 +455,8 @@ def tile_process(model, img_tensor, model_scale, tile_size, tile_pad):
 
 
 def upscale_video(input_video, frames_dir, model_path,
-                  tile_size, tile_pad, outscale, use_full_precision, resume):
+                  tile_size, tile_pad, output_w, output_h,
+                  use_full_precision, resume):
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     use_half = (not use_full_precision) and (device == 'cuda')
@@ -430,7 +472,7 @@ def upscale_video(input_video, frames_dir, model_path,
     if use_half:
         model = model.half()
 
-    print(f"Model native scale: {model_scale}x  |  Target outscale: {outscale:.4f}x")
+    print(f"Model scale: {model_scale}x  |  Target output: {output_w}x{output_h}")
 
     os.makedirs(frames_dir, exist_ok=True)
 
@@ -440,38 +482,92 @@ def upscale_video(input_video, frames_dir, model_path,
     if total_frames <= 0:
         total_frames = None  # unknown — tqdm will show count only
 
-    with open(os.path.join(frames_dir, 'fps.txt'), 'w') as f:
-        f.write(str(fps))
+    with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
+        fh.write(str(fps))
 
-    frame_num = 0
-    skipped   = 0
+    # ── Async 3-stage pipeline ─────────────────────────────────────────────────
+    #   Stage 1 (reader thread):  decode frames from video  → read_q
+    #   Stage 2 (main / GPU):     AI upscale                read_q → write_q
+    #   Stage 3 (writer thread):  compress & write PNG      write_q → disk
+    #
+    # This keeps the GPU busy while the previous frame is being written to disk
+    # and the next frame is being decoded — especially beneficial on fast GPUs
+    # or when writing to slower storage.
+    # ──────────────────────────────────────────────────────────────────────────
+    read_q  = queue.Queue(maxsize=READER_QUEUE_DEPTH)
+    write_q = queue.Queue(maxsize=WRITER_QUEUE_DEPTH)
+
+    skipped = [0]
+    err     = threading.Event()
+
+    def reader_fn():
+        """Decode video frames and push them onto read_q. Runs in a background thread."""
+        fn = 0
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_path = os.path.join(frames_dir, f'frame_{fn:08d}.png')
+                # Signal GPU stage to skip frames already on disk (resume mode)
+                if resume and os.path.isfile(frame_path):
+                    read_q.put((fn, None, frame_path))
+                else:
+                    read_q.put((fn, frame, frame_path))
+                fn += 1
+        except Exception as e:
+            print(f"\n[ERROR] Reader thread: {e}", flush=True)
+            err.set()
+        finally:
+            read_q.put(None)  # sentinel — signals GPU stage that decoding is done
+
+    def writer_fn():
+        """Write upscaled PNG frames from write_q to disk. Runs in a background thread."""
+        try:
+            while True:
+                item = write_q.get()
+                if item is None:
+                    break
+                frame_path, out_frame = item
+                # PNG compression=1: fastest write, larger file — correct for temp frames
+                cv2.imwrite(frame_path, out_frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        except Exception as e:
+            print(f"\n[ERROR] Writer thread: {e}", flush=True)
+            err.set()
+
+    reader_t = threading.Thread(target=reader_fn, daemon=True)
+    writer_t = threading.Thread(target=writer_fn, daemon=True)
+    reader_t.start()
+    writer_t.start()
+
+    frame_count = 0
 
     with tqdm(total=total_frames, desc="Upscaling frames", unit="frame") as pbar:
         while True:
-            ret, frame = cap.read()
-            if not ret:
+            item = read_q.get()
+            if item is None or err.is_set():
                 break
 
-            frame_path = os.path.join(frames_dir, f'frame_{frame_num:08d}.png')
+            frame_num, frame, frame_path = item
 
-            # Resume: skip frames already on disk
-            if resume and os.path.isfile(frame_path):
-                frame_num += 1
-                skipped   += 1
+            if frame is None:
+                # Resume mode — frame already exists on disk, nothing to do
+                skipped[0] += 1
                 pbar.update(1)
+                frame_count += 1
                 continue
 
             try:
-                h, w    = frame.shape[:2]
-                img_t   = frame_to_tensor(frame, device, use_half)
+                h, w  = frame.shape[:2]
+                img_t = frame_to_tensor(frame, device, use_half)
 
                 if tile_size > 0:
                     out_t = tile_process(model, img_t, model_scale, tile_size, tile_pad)
                 else:
-                    # Full-image inference (only viable for small frames with large VRAM)
-                    img_padded, pw, ph = pad_to_multiple(img_t, WINDOW_MULTIPLE)
+                    # Full-image inference (only viable for small frames / large VRAM)
+                    img_pad, pw, ph = pad_to_multiple(img_t, WINDOW_MULTIPLE)
                     with torch.no_grad():
-                        out_t = model(img_padded).float()
+                        out_t = model(img_pad).float()
                     if ph > 0 or pw > 0:
                         out_t = out_t[
                             :, :,
@@ -481,34 +577,40 @@ def upscale_video(input_video, frames_dir, model_path,
 
                 out_frame = tensor_to_frame(out_t)
 
-                # Resize from model's native 4x to target outscale
-                # INTER_AREA for downscaling (e.g. 4x → 2.25x), INTER_LANCZOS4 otherwise
-                target_h = round(h * outscale)
-                target_w = round(w * outscale)
-                if out_frame.shape[0] != target_h or out_frame.shape[1] != target_w:
-                    interp = cv2.INTER_AREA if outscale < model_scale else cv2.INTER_LANCZOS4
-                    out_frame = cv2.resize(out_frame, (target_w, target_h), interpolation=interp)
+                # Resize from model's native output to the target display dimensions.
+                # INTER_AREA for downscaling (4x native → smaller target, e.g. 1080p→2160p),
+                # INTER_LANCZOS4 for upscaling (target larger than model native output).
+                if out_frame.shape[0] != output_h or out_frame.shape[1] != output_w:
+                    interp = cv2.INTER_AREA if (output_h < h * model_scale) else cv2.INTER_LANCZOS4
+                    out_frame = cv2.resize(out_frame, (output_w, output_h), interpolation=interp)
 
-                # PNG compression=1: fastest write, larger files — correct for temp frames
-                cv2.imwrite(frame_path, out_frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                write_q.put((frame_path, out_frame))
 
             except Exception as e:
-                print(f"\n[WARN] Frame {frame_num} failed: {e}", flush=True)
+                print(f"\n[WARN] Frame {frame_num} failed ({e}) — writing resized original", flush=True)
+                try:
+                    fallback = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_LANCZOS4)
+                    write_q.put((frame_path, fallback))
+                except Exception:
+                    pass
 
-            frame_num += 1
+            frame_count += 1
             pbar.update(1)
 
+    write_q.put(None)   # signal writer thread to finish
+    writer_t.join()     # wait for all frames to be written to disk
+    reader_t.join(timeout=2)
     cap.release()
 
-    if skipped > 0:
-        print(f"Resumed: skipped {skipped} already-completed frames")
+    if skipped[0] > 0:
+        print(f"Resumed: skipped {skipped[0]} already-completed frames")
 
-    return frame_num > 0
+    return frame_count > 0
 
 
 if __name__ == '__main__':
     _, input_video, frames_dir, model_path, \
-        tile_size, tile_pad, outscale, \
+        tile_size, tile_pad, output_w, output_h, \
         use_full_precision_str, resume_str = sys.argv
 
     success = upscale_video(
@@ -517,7 +619,8 @@ if __name__ == '__main__':
         model_path         = model_path,
         tile_size          = int(tile_size),
         tile_pad           = int(tile_pad),
-        outscale           = float(outscale),
+        output_w           = int(output_w),
+        output_h           = int(output_h),
         use_full_precision = (use_full_precision_str == 'true'),
         resume             = (resume_str == 'true'),
     )
@@ -542,7 +645,8 @@ upscale_video() {
         "$MODEL_PATH" \
         "$TILE_SIZE" \
         "$TILE_PAD" \
-        "$SCALE_FACTOR" \
+        "$OUTPUT_WIDTH" \
+        "$OUTPUT_HEIGHT" \
         "$FULL_PRECISION" \
         "$RESUME"
 

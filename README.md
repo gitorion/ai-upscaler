@@ -43,7 +43,7 @@ Note: `hat` additionally requires `pip install spandrel-extra-arches` in the ven
 ```bash
 cd ~/ai-upscale
 
-# Upscale to 1080p (uses nomos8k + medium prefilter by default)
+# Upscale to 1080p (uses nomos8k + light prefilter by default)
 ./upscale_video.sh -i input.mkv -r 1080p
 
 # Upscale to 4K
@@ -61,7 +61,7 @@ Model:
   -m, --model TYPE          nomos8k (default), lsdir, ultrasharp, realesrgan, hat
 
 Pre-processing:
-  --prefilter LEVEL         none, light, medium (default), heavy
+  --prefilter LEVEL         none, light (default), medium, heavy
   --deinterlace             Deinterlace source before upscaling
 
 Output:
@@ -71,7 +71,7 @@ Output:
 
 Performance / quality:
   -t, --tile SIZE           Tile size (default: 512 — reduce to 256/128 on low VRAM)
-  --tile-pad SIZE           Tile overlap padding (default: 32)
+  --tile-pad SIZE           Tile overlap padding (default: 64)
   --full-precision          Use float32 instead of float16
 
 Workflow:
@@ -88,9 +88,9 @@ Runs an FFmpeg pass over the source before the AI sees it, using lossless ffv1 e
 
 | Level | What it applies |
 |-------|----------------|
-| `none` | Raw input — no filtering |
-| `light` | Mild temporal denoise (hqdn3d) |
-| `medium` | Denoise + deblock — recommended for most compressed sources |
+| `none` | Raw input — best for clean sources (Blu-ray rips, quality 1080p) |
+| `light` | Mild temporal denoise — **default**, safe for most content |
+| `medium` | Denoise + deblock — for visibly compressed or blocky sources |
 | `heavy` | Strong denoise + deblock + deringing — for badly degraded sources |
 
 ### --deinterlace
@@ -109,7 +109,7 @@ All models are 4x. Selection guide:
 
 ### --tile / --tile-pad
 
-Each frame is split into tiles for GPU processing. Larger tiles give slightly better quality at tile borders but require more VRAM. tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — increasing this (e.g. `--tile-pad 64`) reduces visible seam lines on high-contrast content at the cost of extra VRAM.
+Each frame is split into tiles for GPU processing. Larger tiles give slightly better quality at tile borders but require more VRAM. tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance; reduce to `--tile-pad 32` if you're running low on VRAM.
 
 ### --resume
 
@@ -136,8 +136,8 @@ Controls the HEVC output encode quality (CRF). Output is always HEVC 10-bit in a
 # Heavily degraded source — maximum pre-processing
 ./upscale_video.sh -i old_vhs.mkv -r 1080p --prefilter heavy --deinterlace
 
-# Cleaner source — highest quality model, lighter pre-processing
-./upscale_video.sh -i bluray_rip.mkv -r 2160p -m hat --prefilter light
+# Clean source — highest quality model, no pre-processing
+./upscale_video.sh -i bluray_rip.mkv -r 2160p -m hat --prefilter none
 
 # Low VRAM — reduce tile size
 ./upscale_video.sh -i video.mkv -r 1080p -t 256
