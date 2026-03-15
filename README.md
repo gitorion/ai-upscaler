@@ -179,7 +179,15 @@ watch -n 1 nvidia-smi
 watch -n 5 df -h
 ```
 
-Disk usage during a run: the temp folder (`~/ai-upscale/temp/`) holds the upscaled PNG frames. For a 480p→1080p upscale these are ~3MB each. A 2-hour film at 24fps is ~170,000 frames — around 500GB. Ensure the partition hosting the temp folder has enough space before starting a long run.
+Disk usage during a run: the temp folder (`~/ai-upscale/temp/`) holds the upscaled PNG frames at the **target** resolution. Frame size scales with output pixels — check your free space before starting a long run.
+
+| Output resolution | ~MB per frame | 2-hour film (24fps) |
+|-------------------|--------------|---------------------|
+| 1080p             | ~3 MB        | ~500 GB             |
+| 1440p             | ~6 MB        | ~1 TB               |
+| 2160p (4K)        | ~12 MB       | **~2 TB**           |
+
+> **Warning:** A 2-hour 1080p→2160p upscale needs approximately 2TB of free space for temp frames. Ensure the partition hosting `~/ai-upscale/temp/` has enough room before starting. Use `df -h` to check. If a run runs out of disk space mid-way, free space and resume with `--resume`.
 
 ## Testing the Installation
 
