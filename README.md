@@ -33,7 +33,7 @@ Process one frame at a time. No additional dependencies beyond the base install.
 | Key | Filename | Best for | Speed (RTX 4060 Ti, 720p) | Download |
 |-----|----------|----------|---------------------------|----------|
 | `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **recommended default** | ~4s/frame | openmodeldb.info |
-| `span` | `4xNomos8kSCSPANPlus.pth` | Better quality than nomos8k, similar speed | ~5s/frame | openmodeldb.info |
+| `span` | `4x-NomosUni_span_multijpg.pth` | SPAN universal — compressed/JPG sources, similar speed to nomos8k | ~5s/frame | openmodeldb.info |
 | `nomos8kdat` | `4xNomos8kDAT.pth` | Highest single-frame quality — ~6× slower, best for short clips | ~22s/frame | openmodeldb.info |
 | `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4s/frame | openmodeldb.info |
 | `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on cleaner sources | ~4s/frame | huggingface.co/Kim2091/UltraSharp |
@@ -133,7 +133,7 @@ All models are 4x. Selection guide:
 **Single-frame (spandrel) — process one frame at a time:**
 
 - **nomos8k** — RRDB-based, trained on real-world degradations. Fast (~4s/frame on RTX 4060 Ti for 720p) and reliable. Best choice for batch processing full episodes or films. **Default.**
-- **span** — SPAN transformer trained on the same data as nomos8k. Better quality than nomos8k with similar speed (~5s/frame). Good upgrade choice if you want better results without a major speed penalty.
+- **span** — SPAN (Swift Parameter-free Attention Network) trained on multi-degradation data including heavy JPG compression. Fast (~5s/frame), universal, good for compressed and noisy sources. Good upgrade from nomos8k if you want better results at similar speed.
 - **nomos8kdat** — DAT transformer, same training data as nomos8k but higher quality. ~6× slower (~22s/frame) — practical for short clips or single scenes, not full episodes.
 - **lsdir** — tends to produce sharper edges and finer detail on detailed scenes.
 - **ultrasharp** — maximum perceived sharpness. Can over-sharpen on already-noisy sources.
@@ -256,7 +256,7 @@ cd ~/ai-upscale
 ├── venv/                   # Python virtual environment
 ├── models/                 # AI model files (.pth)
 │   ├── 4xNomos8kSC.pth              ← default model (nomos8k)
-│   ├── 4xNomos8kSCSPANPlus.pth      ← span
+│   ├── 4x-NomosUni_span_multijpg.pth ← span
 │   ├── 4xNomos8kDAT.pth             ← nomos8kdat
 │   ├── 4xLSDIR.pth
 │   ├── 4x-UltraSharp.pth

@@ -43,7 +43,7 @@ SPYNET_PATH=""
 # ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
 declare -A MODEL_FILES=(
     [nomos8k]="4xNomos8kSC.pth"
-    [span]="4xNomos8kSCSPANPlus.pth"
+    [span]="4x-NomosUni_span_multijpg.pth"
     [nomos8kdat]="4xNomos8kDAT.pth"
     [lsdir]="4xLSDIR.pth"
     [ultrasharp]="4x-UltraSharp.pth"
@@ -157,7 +157,7 @@ Examples:
 
 Model downloads (place .pth files in $MODEL_DIR):
   nomos8k      openmodeldb.info                           → 4xNomos8kSC.pth
-  span         openmodeldb.info                           → 4xNomos8kSCSPANPlus.pth
+  span         openmodeldb.info                           → 4x-NomosUni_span_multijpg.pth
   nomos8kdat   openmodeldb.info                           → 4xNomos8kDAT.pth
   lsdir        github.com/Phhofm/models                  → 4xLSDIR.pth
   ultrasharp   huggingface.co/Kim2091/UltraSharp          → 4x-UltraSharp.pth
