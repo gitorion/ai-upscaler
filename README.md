@@ -70,7 +70,11 @@ Output:
   --sharpen                 Apply unsharp mask to final output
 
 Performance / quality:
-  -t, --tile SIZE           Tile size (default: 512 — reduce to 256/128 on low VRAM)
+  -t, --tile SIZE           Tile size (auto-selected by source resolution — override if needed)
+                              0     Full-frame, no tiling  (auto for ≤720p)
+                              1024  2×2 tiles              (auto for 1080p)
+                              512   3×3+ tiles             (auto for 1440p/2160p)
+                            Reduce on low VRAM: 256, 128
   --tile-pad SIZE           Tile overlap padding (default: 64)
   --full-precision          Use float32 instead of float16
 
@@ -109,7 +113,15 @@ All models are 4x. Selection guide:
 
 ### --tile / --tile-pad
 
-Each frame is split into tiles for GPU processing. Larger tiles give slightly better quality at tile borders but require more VRAM. tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance; reduce to `--tile-pad 32` if you're running low on VRAM.
+Tile size is auto-selected based on the source resolution:
+
+| Source | Auto tile | Behaviour |
+|--------|-----------|-----------|
+| ≤ 720p | `0` | Full-frame inference — no tiling, no seams |
+| 1080p  | `1024` | 2×2 tiles |
+| 1440p+ | `512` | 3×3 or more tiles |
+
+Pass `-t SIZE` to override. Reduce to `256` or `128` if you hit VRAM limits. tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance; reduce to `--tile-pad 32` to save VRAM.
 
 ### --resume
 

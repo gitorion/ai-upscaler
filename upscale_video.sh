@@ -24,6 +24,7 @@ VENV_DIR="$SCRIPT_DIR/venv"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TILE_SIZE=512
+TILE_SIZE_EXPLICIT=false
 TILE_PAD=64
 MODEL_KEY="nomos8k"
 QUALITY="high"
@@ -85,7 +86,10 @@ Output:
   --sharpen                 Apply mild unsharp mask to final output
 
 Performance / quality:
-  -t, --tile SIZE           Tile size for GPU processing (default: 512)
+  -t, --tile SIZE           Tile size for GPU processing (auto by source resolution)
+                              0      Full-frame — no tiling (auto for ≤720p)
+                              1024   2×2 tiles   (auto for 1080p)
+                              512    3×3+ tiles  (auto for 1440p/2160p, or override)
                             Reduce on low VRAM: 256, 128
   --tile-pad SIZE           Tile overlap padding in pixels (default: 64)
                             Increase to reduce seam artifacts; decrease to save VRAM
@@ -637,7 +641,10 @@ upscale_video() {
     write_python_script
 
     print_info "Starting AI upscaling..."
-    print_info "Model: $MODEL_KEY  |  Tile: ${TILE_SIZE}  |  Tile-pad: ${TILE_PAD}  |  Prefilter: ${PREFILTER}"
+    local tile_note="$TILE_SIZE"
+    [[ "$TILE_SIZE" == "0" ]] && tile_note="0 (full-frame)"
+    [[ "$TILE_SIZE_EXPLICIT" == false ]] && tile_note+=" (auto)"
+    print_info "Model: $MODEL_KEY  |  Tile: ${tile_note}  |  Tile-pad: ${TILE_PAD}  |  Prefilter: ${PREFILTER}"
 
     "$VENV_DIR/bin/python3" "$TEMP_DIR/upscale.py" \
         "$UPSCALE_SOURCE" \
@@ -752,7 +759,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output)      OUTPUT_FILE="$2";     shift 2 ;;
         -r|--resolution)  RESOLUTION="$2";      shift 2 ;;
         -m|--model)       MODEL_KEY="$2";       shift 2 ;;
-        -t|--tile)        TILE_SIZE="$2";       shift 2 ;;
+        -t|--tile)        TILE_SIZE="$2"; TILE_SIZE_EXPLICIT=true; shift 2 ;;
         --tile-pad)       TILE_PAD="$2";        shift 2 ;;
         -q|--quality)     QUALITY="$2";         shift 2 ;;
         --prefilter)      PREFILTER="$2";       shift 2 ;;
@@ -807,6 +814,17 @@ print_info ""
 
 check_dependencies
 get_video_info "$INPUT_FILE"
+
+# Auto-select tile size based on source resolution if the user didn't override with -t
+if [[ "$TILE_SIZE_EXPLICIT" == false ]]; then
+    if (( INPUT_HEIGHT <= 720 )); then
+        TILE_SIZE=0        # full-frame inference — fits comfortably in 16GB for 720p and below
+    elif (( INPUT_HEIGHT <= 1080 )); then
+        TILE_SIZE=1024     # 2×2 tiles for 1080p — safe on 16GB, fewer passes than default 512
+    fi
+    # 1440p / 2160p keep the 512 default
+fi
+
 calculate_scale "$RESOLUTION"
 
 if [[ "$USE_AI" == true ]]; then
