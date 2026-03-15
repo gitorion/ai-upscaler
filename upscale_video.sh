@@ -55,7 +55,7 @@ declare -A MODEL_FILES=(
 # Requires: pip install basicsr  +  spynet_20210409-c6c1bd09.pth in models/
 declare -A TEMPORAL_MODEL_FILES=(
     [basicvsr]="BasicVSR_PlusPlus_REDS4.pth"
-    [realbasicvsr]="RealBasicVSR_x4v2.pth"
+    [realbasicvsr]="RealBasicVSR.pth"
 )
 
 ##############################################################################
@@ -159,8 +159,9 @@ Model downloads (place .pth files in $MODEL_DIR):
   hat          github.com/XPixelGroup/HAT/releases        → HAT-L_SRx4_ImageNet-pretrain.pth
                (requires: pip install spandrel-extra-arches)
   basicvsr     github.com/ckkelvinchan/BasicVSR_PlusPlus  → BasicVSR_PlusPlus_REDS4.pth
+               (download as basicvsr_plusplus_c64n7_...pth, rename to BasicVSR_PlusPlus_REDS4.pth)
                (requires: pip install basicsr)
-  realbasicvsr github.com/ckkelvinchan/RealBasicVSR       → RealBasicVSR_x4v2.pth
+  realbasicvsr github.com/ckkelvinchan/RealBasicVSR       → RealBasicVSR.pth
                (requires: pip install basicsr)
   spynet       Required by both temporal models           → spynet_20210409-c6c1bd09.pth
                (downloaded automatically by basicsr on first use)
