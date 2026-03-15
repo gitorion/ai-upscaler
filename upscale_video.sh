@@ -26,7 +26,7 @@ VENV_DIR="$SCRIPT_DIR/venv"
 TILE_SIZE=512
 TILE_SIZE_EXPLICIT=false
 TILE_PAD=64
-MODEL_KEY="nomos8k"
+MODEL_KEY="nomos8kdat"
 QUALITY="high"
 PREFILTER="light"
 DEINTERLACE=false
@@ -38,6 +38,7 @@ UPSCALE_SOURCE=""
 
 # ── Model registry (all 4x; outscale handles sub-4x targets) ──────────────────
 declare -A MODEL_FILES=(
+    [nomos8kdat]="4xNomos8kDAT.pth"
     [nomos8k]="4xNomos8kSC.pth"
     [lsdir]="4xLSDIR.pth"
     [ultrasharp]="4x-UltraSharp.pth"
@@ -65,8 +66,9 @@ Required:
   -r, --resolution RES      Target resolution: 720p, 1080p, 1440p, 2160p
 
 Model selection:
-  -m, --model TYPE          Upscale model (default: nomos8k)
-                              nomos8k    Best all-round for compressed live-action  ← default
+  -m, --model TYPE          Upscale model (default: nomos8kdat)
+                              nomos8kdat Best all-round for compressed live-action  ← default
+                              nomos8k    Previous default — RRDB-based, good for degraded sources
                               lsdir      Sharp detail, handles real-world degradations
                               ultrasharp Maximum sharpness (better on cleaner sources)
                               realesrgan Real-ESRGAN x4plus (legacy fallback)

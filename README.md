@@ -28,13 +28,16 @@ Models are not included and must be downloaded manually to `~/ai-upscale/models/
 
 | Key | Filename | Best for | Download |
 |-----|----------|----------|----------|
-| `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **recommended default** | openmodeldb.info |
+| `nomos8kdat` | `4xNomos8kDAT.pth` | Compressed live-action — **recommended default** | openmodeldb.info |
+| `nomos8k` | `4xNomos8kSC.pth` | Previous default — good fallback if DAT unavailable | openmodeldb.info |
 | `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | openmodeldb.info |
 | `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on cleaner sources | huggingface.co/Kim2091/UltraSharp |
 | `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | github.com/xinntao/Real-ESRGAN/releases |
 | `hat` | `HAT-L_SRx4_ImageNet-pretrain.pth` | Highest fidelity, clean sources only | github.com/XPixelGroup/HAT/releases |
 
 All models are 4x. The script uses the model's native 4x output and resizes to your target resolution at the FFmpeg encode step.
+
+`nomos8kdat` uses the DAT (Dual Aggregation Transformer) architecture trained on the same Nomos8k real-world degradation dataset as the previous default. It produces sharper results with fewer hallucinated artefacts than the RRDB-based `nomos8k`.
 
 Note: `hat` additionally requires `pip install spandrel-extra-arches` in the venv.
 
@@ -43,7 +46,7 @@ Note: `hat` additionally requires `pip install spandrel-extra-arches` in the ven
 ```bash
 cd ~/ai-upscale
 
-# Upscale to 1080p (uses nomos8k + light prefilter by default)
+# Upscale to 1080p (uses nomos8kdat + light prefilter by default)
 ./upscale_video.sh -i input.mkv -r 1080p
 
 # Upscale to 4K
@@ -58,7 +61,7 @@ Required:
   -r, --resolution RES      Target: 720p, 1080p, 1440p, 2160p
 
 Model:
-  -m, --model TYPE          nomos8k (default), lsdir, ultrasharp, realesrgan, hat
+  -m, --model TYPE          nomos8kdat (default), nomos8k, lsdir, ultrasharp, realesrgan, hat
 
 Pre-processing:
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -105,11 +108,12 @@ Prepends a yadif deinterlace pass before the prefilter. Use for interlaced sourc
 
 All models are 4x. Selection guide:
 
-- **nomos8k** — trained on real-world degradations, handles compression well. Best starting point for most sources.
+- **nomos8kdat** — DAT (Dual Aggregation Transformer) trained on real-world degradations. Sharper and more accurate than the older RRDB-based nomos8k. Best starting point for most sources. **Default.**
+- **nomos8k** — the previous default. RRDB-based, well-tested. Good fallback if nomos8kdat is not yet downloaded.
 - **lsdir** — tends to produce sharper edges and finer detail on detailed scenes.
 - **ultrasharp** — maximum perceived sharpness. Can over-sharpen on already-noisy sources.
-- **realesrgan** — the original RealESRGAN x4plus. Kept as a fallback if others aren't downloaded.
-- **hat** — Hybrid Attention Transformer. Highest fidelity model but designed for clean (lightly degraded) sources. Pair with `--prefilter light` or `none`.
+- **realesrgan** — the original RealESRGAN x4plus. Kept as a legacy fallback.
+- **hat** — Hybrid Attention Transformer. Highest fidelity model but designed for clean (lightly degraded) sources. Pair with `--prefilter none`.
 
 ### --tile / --tile-pad
 
@@ -204,6 +208,7 @@ cd ~/ai-upscale
 ├── test.sh                 # Installation test script
 ├── venv/                   # Python virtual environment
 ├── models/                 # AI model files (.pth)
+│   ├── 4xNomos8kDAT.pth             ← default model
 │   ├── 4xNomos8kSC.pth
 │   ├── 4xLSDIR.pth
 │   ├── 4x-UltraSharp.pth

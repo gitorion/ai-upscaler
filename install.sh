@@ -281,17 +281,18 @@ download_models() {
     set -e
 
     echo ""
-    print_warning "The recommended default model (4xNomos8kSC.pth) must be downloaded manually:"
+    print_warning "The recommended default model (4xNomos8kDAT.pth) must be downloaded manually:"
     print_info "  1. Go to: https://openmodeldb.info"
-    print_info "  2. Search for '4xNomos8kSC'"
-    print_info "  3. Download 4xNomos8kSC.pth → place in $MODEL_DIR"
+    print_info "  2. Search for '4xNomos8kDAT'"
+    print_info "  3. Download 4xNomos8kDAT.pth → place in $MODEL_DIR"
     echo ""
     print_warning "Other optional models (also from openmodeldb.info):"
+    print_info "  - 4xNomos8kSC.pth   (model key: nomos8k  — previous default, RRDB-based)"
     print_info "  - 4xLSDIR.pth       (model key: lsdir)"
     print_info "  - HAT-L_SRx4_ImageNet-pretrain.pth  (model key: hat)"
     echo ""
 
-    if [ ! -f "RealESRGAN_x4plus.pth" ] && [ ! -f "4xNomos8kSC.pth" ]; then
+    if [ ! -f "RealESRGAN_x4plus.pth" ] && [ ! -f "4xNomos8kDAT.pth" ] && [ ! -f "4xNomos8kSC.pth" ]; then
         print_error "No models found in $MODEL_DIR"
         print_error "Download at least one model before upscaling"
     else
