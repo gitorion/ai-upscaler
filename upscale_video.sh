@@ -391,12 +391,23 @@ def frame_to_tensor(frame, device, use_half):
     return t.to(device, non_blocking=True)
 
 
-def tensor_to_frame(t):
+def tensor_to_frame(t, frame_num=None):
     """Convert NCHW float [0,1] tensor to cv2 BGR uint8 HWC frame."""
-    # nan_to_num guards against NaN/Inf produced by transformer attention overflow
-    # in float16 mode (DAT, HAT, SwinIR). No-op when all values are finite.
-    out = torch.nan_to_num(t.squeeze(0).float(), nan=0.0, posinf=1.0, neginf=0.0)
-    out = out.cpu().clamp(0, 1)
+    raw = t.squeeze(0).float()
+    if not torch.isfinite(raw).all():
+        bad = (~torch.isfinite(raw)).sum().item()
+        total = raw.numel()
+        label = f"frame {frame_num}" if frame_num is not None else "frame"
+        if bad == total:
+            print(
+                f"\n[WARN] {label}: entire output is NaN/Inf — model is overflowing float16. "
+                "Re-run with --full-precision to fix this (use -t 512 to keep within VRAM).",
+                flush=True,
+            )
+        else:
+            print(f"\n[WARN] {label}: {bad}/{total} NaN/Inf values replaced with 0.", flush=True)
+        raw = torch.nan_to_num(raw, nan=0.0, posinf=1.0, neginf=0.0)
+    out = raw.cpu().clamp(0, 1)
     return cv2.cvtColor(
         (out.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8),
         cv2.COLOR_RGB2BGR,
@@ -585,7 +596,7 @@ def upscale_video(input_video, frames_dir, model_path,
                             : out_t.shape[3] - pw * model_scale,
                         ]
 
-                out_frame = tensor_to_frame(out_t)
+                out_frame = tensor_to_frame(out_t, frame_num)
 
                 # Resize from model's native output to the target display dimensions.
                 # INTER_AREA for downscaling (4x native → smaller target, e.g. 1080p→2160p),
