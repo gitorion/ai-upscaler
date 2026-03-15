@@ -89,9 +89,11 @@ Output:
 
 Performance / quality:
   -t, --tile SIZE           Tile size for GPU processing (auto by source resolution)
-                              0      Full-frame — no tiling (auto for ≤720p)
-                              1024   2×2 tiles   (auto for 1080p)
-                              512    3×3+ tiles  (auto for 1440p/2160p, or override)
+                              0      Full-frame — no tiling (RRDB models only: nomos8k,
+                                     realesrgan, lsdir, ultrasharp — NOT for transformer
+                                     models like nomos8kdat or hat)
+                              512    auto for ≤720p and 1440p/2160p
+                              1024   auto for 1080p (2×2 tiles)
                             Reduce on low VRAM: 256, 128
   --tile-pad SIZE           Tile overlap padding in pixels (default: 64)
                             Increase to reduce seam artifacts; decrease to save VRAM
@@ -392,7 +394,10 @@ def frame_to_tensor(frame, device, use_half):
 
 def tensor_to_frame(t):
     """Convert NCHW float [0,1] tensor to cv2 BGR uint8 HWC frame."""
-    out = t.squeeze(0).float().cpu().clamp(0, 1)
+    # nan_to_num guards against NaN/Inf produced by transformer attention overflow
+    # in float16 mode (DAT, HAT, SwinIR). No-op when all values are finite.
+    out = torch.nan_to_num(t.squeeze(0).float(), nan=0.0, posinf=1.0, neginf=0.0)
+    out = out.cpu().clamp(0, 1)
     return cv2.cvtColor(
         (out.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8),
         cv2.COLOR_RGB2BGR,
@@ -817,12 +822,16 @@ print_info ""
 check_dependencies
 get_video_info "$INPUT_FILE"
 
-# Auto-select tile size based on source resolution if the user didn't override with -t
+# Auto-select tile size based on source resolution if the user didn't override with -t.
+# Full-frame (tile=0) is only beneficial for RRDB-based models (nomos8k, realesrgan,
+# lsdir, ultrasharp) — transformer models (nomos8kdat, hat) run dramatically slower
+# with full-frame inference due to their attention mechanisms. Use -t 0 explicitly
+# only when running an RRDB model where you want maximum speed on ≤720p content.
 if [[ "$TILE_SIZE_EXPLICIT" == false ]]; then
     if (( INPUT_HEIGHT <= 720 )); then
-        TILE_SIZE=0        # full-frame inference — fits comfortably in 16GB for 720p and below
+        TILE_SIZE=512      # safe for all architectures including transformers
     elif (( INPUT_HEIGHT <= 1080 )); then
-        TILE_SIZE=1024     # 2×2 tiles for 1080p — safe on 16GB, fewer passes than default 512
+        TILE_SIZE=1024     # 2×2 tiles for 1080p
     fi
     # 1440p / 2160p keep the 512 default
 fi

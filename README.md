@@ -74,9 +74,10 @@ Output:
 
 Performance / quality:
   -t, --tile SIZE           Tile size (auto-selected by source resolution — override if needed)
-                              0     Full-frame, no tiling  (auto for ≤720p)
-                              1024  2×2 tiles              (auto for 1080p)
-                              512   3×3+ tiles             (auto for 1440p/2160p)
+                              512   auto for ≤720p and 1440p/2160p
+                              1024  auto for 1080p (2×2 tiles)
+                              0     Full-frame — RRDB models only (nomos8k, realesrgan,
+                                    lsdir, ultrasharp); do NOT use with nomos8kdat or hat
                             Reduce on low VRAM: 256, 128
   --tile-pad SIZE           Tile overlap padding (default: 64)
   --full-precision          Use float32 instead of float16
@@ -121,11 +122,13 @@ Tile size is auto-selected based on the source resolution:
 
 | Source | Auto tile | Behaviour |
 |--------|-----------|-----------|
-| ≤ 720p | `0` | Full-frame inference — no tiling, no seams |
+| ≤ 720p | `512` | 3×2 tiles — safe for all model architectures |
 | 1080p  | `1024` | 2×2 tiles |
 | 1440p+ | `512` | 3×3 or more tiles |
 
 Pass `-t SIZE` to override. Reduce to `256` or `128` if you hit VRAM limits. tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance; reduce to `--tile-pad 32` to save VRAM.
+
+> **Note on `-t 0` (full-frame):** Full-frame inference skips tiling entirely and processes the whole frame in one shot. This is faster for RRDB-based models (`nomos8k`, `realesrgan`, `lsdir`, `ultrasharp`) on ≤720p content with enough VRAM. However it is **not suitable for transformer models** (`nomos8kdat`, `hat`) — attention mechanisms make full-frame inference extremely slow and can produce NaN artefacts in float16 mode. Only use `-t 0` when explicitly running an RRDB model.
 
 ### --resume
 
