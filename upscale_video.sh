@@ -2,7 +2,7 @@
 
 ##############################################################################
 # AI Video Upscaler — spandrel + basicsr edition
-# Single-frame models: nomos8k (default), span, nomos8kdat, lsdir, ultrasharp, realesrgan, hat
+# Single-frame models: nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat
 # Temporal models:     basicvsr, realbasicvsr  (multi-frame, requires basicsr)
 # Optimised for live-action, compressed/noisy, artifact-heavy sources
 # Requires: FFmpeg, Python 3, spandrel, CUDA GPU
@@ -43,7 +43,6 @@ SPYNET_PATH=""
 # ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
 declare -A MODEL_FILES=(
     [nomos8k]="4xNomos8kSC.pth"
-    [span]="4x-NomosUni_span_multijpg.pth"
     [nomos8kdat]="4xNomos8kDAT.pth"
     [lsdir]="4xLSDIR.pth"
     [ultrasharp]="4x-UltraSharp.pth"
@@ -81,7 +80,6 @@ Required:
 Model selection (-m / --model):
   ── Single-frame models (spandrel) ──────────────────────────────────────────
   nomos8k     Best all-round for compressed live-action — fast (~4s/frame)  ← default
-  span        SPAN transformer — better quality than nomos8k, still fast (~5s/frame)
   nomos8kdat  DAT transformer — highest single-frame quality, ~6× slower (~22s/frame)
   lsdir       Sharp detail, handles real-world degradations
   ultrasharp  Maximum sharpness (better on cleaner sources)
@@ -134,9 +132,6 @@ Examples:
   # Standard — compressed broadcast or web download
   $0 -i film.mkv -r 1080p
 
-  # SPAN — better quality than nomos8k, similar speed
-  $0 -i film.mkv -r 1080p -m span
-
   # Temporal — best for flickery/heavily compressed sources
   $0 -i film.mkv -r 1080p -m realbasicvsr
 
@@ -157,7 +152,6 @@ Examples:
 
 Model downloads (place .pth files in $MODEL_DIR):
   nomos8k      openmodeldb.info                           → 4xNomos8kSC.pth
-  span         openmodeldb.info                           → 4x-NomosUni_span_multijpg.pth
   nomos8kdat   openmodeldb.info                           → 4xNomos8kDAT.pth
   lsdir        github.com/Phhofm/models                  → 4xLSDIR.pth
   ultrasharp   huggingface.co/Kim2091/UltraSharp          → 4x-UltraSharp.pth

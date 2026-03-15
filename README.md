@@ -33,7 +33,6 @@ Process one frame at a time. No additional dependencies beyond the base install.
 | Key | Filename | Best for | Speed (RTX 4060 Ti, 720p) | Download |
 |-----|----------|----------|---------------------------|----------|
 | `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **recommended default** | ~4s/frame | openmodeldb.info |
-| `span` | `4x-NomosUni_span_multijpg.pth` | SPAN universal — compressed/JPG sources, similar speed to nomos8k | ~5s/frame | openmodeldb.info |
 | `nomos8kdat` | `4xNomos8kDAT.pth` | Highest single-frame quality — ~6× slower, best for short clips | ~22s/frame | openmodeldb.info |
 | `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4s/frame | openmodeldb.info |
 | `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on cleaner sources | ~4s/frame | huggingface.co/Kim2091/UltraSharp |
@@ -77,7 +76,7 @@ Required:
   -r, --resolution RES      Target: 720p, 1080p, 1440p, 2160p
 
 Model:
-  -m, --model TYPE          nomos8k (default), span, nomos8kdat, lsdir, ultrasharp,
+  -m, --model TYPE          nomos8k (default), nomos8kdat, lsdir, ultrasharp,
                             realesrgan, hat, basicvsr, realbasicvsr
 
 Pre-processing:
@@ -133,7 +132,6 @@ All models are 4x. Selection guide:
 **Single-frame (spandrel) — process one frame at a time:**
 
 - **nomos8k** — RRDB-based, trained on real-world degradations. Fast (~4s/frame on RTX 4060 Ti for 720p) and reliable. Best choice for batch processing full episodes or films. **Default.**
-- **span** — SPAN (Swift Parameter-free Attention Network) trained on multi-degradation data including heavy JPG compression. Fast (~5s/frame), universal, good for compressed and noisy sources. Good upgrade from nomos8k if you want better results at similar speed.
 - **nomos8kdat** — DAT transformer, same training data as nomos8k but higher quality. ~6× slower (~22s/frame) — practical for short clips or single scenes, not full episodes.
 - **lsdir** — tends to produce sharper edges and finer detail on detailed scenes.
 - **ultrasharp** — maximum perceived sharpness. Can over-sharpen on already-noisy sources.
@@ -163,7 +161,7 @@ Tile size is auto-selected based on the source resolution:
 
 Pass `-t SIZE` to override. Reduce to `256` or `128` if you hit VRAM limits. tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance; reduce to `--tile-pad 32` to save VRAM.
 
-> **Note on `-t 0` (full-frame):** Full-frame inference skips tiling entirely and processes the whole frame in one shot. This is faster for RRDB-based models (`nomos8k`, `realesrgan`, `lsdir`, `ultrasharp`) on ≤720p content with enough VRAM. However it is **not suitable for transformer models** (`span`, `nomos8kdat`, `hat`) — attention mechanisms make full-frame inference extremely slow and can produce NaN artefacts in float16 mode. Only use `-t 0` when explicitly running an RRDB model.
+> **Note on `-t 0` (full-frame):** Full-frame inference skips tiling entirely and processes the whole frame in one shot. This is faster for RRDB-based models (`nomos8k`, `realesrgan`, `lsdir`, `ultrasharp`) on ≤720p content with enough VRAM. However it is **not suitable for transformer models** (`nomos8kdat`, `hat`) — attention mechanisms make full-frame inference extremely slow and can produce NaN artefacts in float16 mode. Only use `-t 0` when explicitly running an RRDB model.
 
 ### --resume
 
@@ -186,9 +184,6 @@ Controls the HEVC output encode quality (CRF). Output is always HEVC 10-bit in a
 ```bash
 # Standard — compressed broadcast rip (nomos8k default)
 ./upscale_video.sh -i recording.mkv -r 1080p
-
-# SPAN — better quality than nomos8k, similar speed
-./upscale_video.sh -i recording.mkv -r 1080p -m span
 
 # Temporal — best for flickery/heavily compressed sources (requires basicsr)
 ./upscale_video.sh -i recording.mkv -r 1080p -m realbasicvsr
@@ -256,7 +251,6 @@ cd ~/ai-upscale
 ├── venv/                   # Python virtual environment
 ├── models/                 # AI model files (.pth)
 │   ├── 4xNomos8kSC.pth              ← default model (nomos8k)
-│   ├── 4x-NomosUni_span_multijpg.pth ← span
 │   ├── 4xNomos8kDAT.pth             ← nomos8kdat
 │   ├── 4xLSDIR.pth
 │   ├── 4x-UltraSharp.pth
@@ -339,7 +333,7 @@ sudo nvidia-smi -pl 165     # Set power limit (adjust to your GPU's TDP)
 - BasicVSR++: github.com/ckkelvinchan/BasicVSR_PlusPlus
 - RealBasicVSR: github.com/ckkelvinchan/RealBasicVSR
 - basicsr: github.com/XPixelGroup/BasicSR
-- 4xNomos8kSC / 4xNomos8kSCSPANPlus / 4xLSDIR: github.com/Phhofm/models
+- 4xNomos8kSC / 4xLSDIR: github.com/Phhofm/models
 - 4x-UltraSharp: huggingface.co/Kim2091
 - FFmpeg: ffmpeg.org
 - PyTorch: pytorch.org
