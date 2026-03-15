@@ -28,8 +28,8 @@ Models are not included and must be downloaded manually to `~/ai-upscale/models/
 
 | Key | Filename | Best for | Download |
 |-----|----------|----------|----------|
-| `nomos8kdat` | `4xNomos8kDAT.pth` | Compressed live-action — **recommended default** | openmodeldb.info |
-| `nomos8k` | `4xNomos8kSC.pth` | Previous default — good fallback if DAT unavailable | openmodeldb.info |
+| `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **recommended default** | openmodeldb.info |
+| `nomos8kdat` | `4xNomos8kDAT.pth` | Higher quality DAT transformer — ~6x slower, best for short clips | openmodeldb.info |
 | `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | openmodeldb.info |
 | `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on cleaner sources | huggingface.co/Kim2091/UltraSharp |
 | `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | github.com/xinntao/Real-ESRGAN/releases |
@@ -37,7 +37,7 @@ Models are not included and must be downloaded manually to `~/ai-upscale/models/
 
 All models are 4x. The script uses the model's native 4x output and resizes to your target resolution at the FFmpeg encode step.
 
-`nomos8kdat` uses the DAT (Dual Aggregation Transformer) architecture trained on the same Nomos8k real-world degradation dataset as the previous default. It produces sharper results with fewer hallucinated artefacts than the RRDB-based `nomos8k`.
+`nomos8kdat` uses the DAT (Dual Aggregation Transformer) architecture and produces sharper results with fewer hallucinated artefacts than `nomos8k`. However on current mid-range hardware (e.g. RTX 4060 Ti) it runs ~6x slower (~23s/frame vs ~4s/frame for 720p content), making it impractical for full episode or film upscaling. Reserve it for short clips or stills where quality is the priority.
 
 Note: `hat` additionally requires `pip install spandrel-extra-arches` in the venv.
 
@@ -46,7 +46,7 @@ Note: `hat` additionally requires `pip install spandrel-extra-arches` in the ven
 ```bash
 cd ~/ai-upscale
 
-# Upscale to 1080p (uses nomos8kdat + light prefilter by default)
+# Upscale to 1080p (uses nomos8k + light prefilter by default)
 ./upscale_video.sh -i input.mkv -r 1080p
 
 # Upscale to 4K
@@ -61,7 +61,7 @@ Required:
   -r, --resolution RES      Target: 720p, 1080p, 1440p, 2160p
 
 Model:
-  -m, --model TYPE          nomos8kdat (default), nomos8k, lsdir, ultrasharp, realesrgan, hat
+  -m, --model TYPE          nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat
 
 Pre-processing:
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -109,8 +109,8 @@ Prepends a yadif deinterlace pass before the prefilter. Use for interlaced sourc
 
 All models are 4x. Selection guide:
 
-- **nomos8kdat** — DAT (Dual Aggregation Transformer) trained on real-world degradations. Sharper and more accurate than the older RRDB-based nomos8k. Best starting point for most sources. **Default.**
-- **nomos8k** — the previous default. RRDB-based, well-tested. Good fallback if nomos8kdat is not yet downloaded.
+- **nomos8k** — RRDB-based, trained on real-world degradations. Fast (~4s/frame on RTX 4060 Ti for 720p) and reliable. Best choice for batch processing full episodes or films. **Default.**
+- **nomos8kdat** — DAT transformer, same training data as nomos8k but higher quality. ~6x slower — practical for short clips or single scenes, not full episodes.
 - **lsdir** — tends to produce sharper edges and finer detail on detailed scenes.
 - **ultrasharp** — maximum perceived sharpness. Can over-sharpen on already-noisy sources.
 - **realesrgan** — the original RealESRGAN x4plus. Kept as a legacy fallback.
@@ -122,7 +122,7 @@ Tile size is auto-selected based on the source resolution:
 
 | Source | Auto tile | Behaviour |
 |--------|-----------|-----------|
-| ≤ 720p | `512` | 3×2 tiles — safe for all model architectures |
+| ≤ 720p | `0` | Full-frame — no tiling (fastest for RRDB models with 16GB VRAM) |
 | 1080p  | `1024` | 2×2 tiles |
 | 1440p+ | `512` | 3×3 or more tiles |
 

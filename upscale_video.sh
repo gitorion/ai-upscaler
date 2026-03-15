@@ -26,7 +26,7 @@ VENV_DIR="$SCRIPT_DIR/venv"
 TILE_SIZE=512
 TILE_SIZE_EXPLICIT=false
 TILE_PAD=64
-MODEL_KEY="nomos8kdat"
+MODEL_KEY="nomos8k"
 QUALITY="high"
 PREFILTER="light"
 DEINTERLACE=false
@@ -66,9 +66,9 @@ Required:
   -r, --resolution RES      Target resolution: 720p, 1080p, 1440p, 2160p
 
 Model selection:
-  -m, --model TYPE          Upscale model (default: nomos8kdat)
-                              nomos8kdat Best all-round for compressed live-action  ← default
-                              nomos8k    Previous default — RRDB-based, good for degraded sources
+  -m, --model TYPE          Upscale model (default: nomos8k)
+                              nomos8k    Best all-round for compressed live-action  ← default
+                              nomos8kdat DAT transformer — higher quality but ~6x slower
                               lsdir      Sharp detail, handles real-world degradations
                               ultrasharp Maximum sharpness (better on cleaner sources)
                               realesrgan Real-ESRGAN x4plus (legacy fallback)
@@ -89,11 +89,10 @@ Output:
 
 Performance / quality:
   -t, --tile SIZE           Tile size for GPU processing (auto by source resolution)
-                              0      Full-frame — no tiling (RRDB models only: nomos8k,
-                                     realesrgan, lsdir, ultrasharp — NOT for transformer
-                                     models like nomos8kdat or hat)
-                              512    auto for ≤720p and 1440p/2160p
-                              1024   auto for 1080p (2×2 tiles)
+                              0      Full-frame — no tiling (auto for ≤720p, RRDB models only)
+                              1024   2×2 tiles (auto for 1080p)
+                              512    3×3+ tiles (auto for 1440p/2160p)
+                            Note: do NOT use -t 0 with transformer models (nomos8kdat, hat)
                             Reduce on low VRAM: 256, 128
   --tile-pad SIZE           Tile overlap padding in pixels (default: 64)
                             Increase to reduce seam artifacts; decrease to save VRAM
@@ -829,7 +828,7 @@ get_video_info "$INPUT_FILE"
 # only when running an RRDB model where you want maximum speed on ≤720p content.
 if [[ "$TILE_SIZE_EXPLICIT" == false ]]; then
     if (( INPUT_HEIGHT <= 720 )); then
-        TILE_SIZE=512      # safe for all architectures including transformers
+        TILE_SIZE=0        # full-frame inference — fastest for RRDB models on ≤720p with 16GB VRAM
     elif (( INPUT_HEIGHT <= 1080 )); then
         TILE_SIZE=1024     # 2×2 tiles for 1080p
     fi
