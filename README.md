@@ -26,20 +26,36 @@ The installer handles NVIDIA drivers, CUDA, FFmpeg, Python environment, and core
 
 Models are not included and must be downloaded manually to `~/ai-upscale/models/`.
 
-| Key | Filename | Best for | Download |
-|-----|----------|----------|----------|
-| `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **recommended default** | openmodeldb.info |
-| `nomos8kdat` | `4xNomos8kDAT.pth` | Higher quality DAT transformer — ~6x slower, best for short clips | openmodeldb.info |
-| `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | openmodeldb.info |
-| `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on cleaner sources | huggingface.co/Kim2091/UltraSharp |
-| `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | github.com/xinntao/Real-ESRGAN/releases |
-| `hat` | `HAT-L_SRx4_ImageNet-pretrain.pth` | Highest fidelity, clean sources only | github.com/XPixelGroup/HAT/releases |
+### Single-frame models (spandrel)
 
-All models are 4x. The script uses the model's native 4x output and resizes to your target resolution at the FFmpeg encode step.
+Process one frame at a time. No additional dependencies beyond the base install.
 
-`nomos8kdat` uses the DAT (Dual Aggregation Transformer) architecture and produces sharper results with fewer hallucinated artefacts than `nomos8k`. However on current mid-range hardware (e.g. RTX 4060 Ti) it runs ~6x slower (~23s/frame vs ~4s/frame for 720p content), making it impractical for full episode or film upscaling. Reserve it for short clips or stills where quality is the priority.
+| Key | Filename | Best for | Speed (RTX 4060 Ti, 720p) | Download |
+|-----|----------|----------|---------------------------|----------|
+| `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **recommended default** | ~4s/frame | openmodeldb.info |
+| `span` | `4xNomos8kSCSPANPlus.pth` | Better quality than nomos8k, similar speed | ~5s/frame | openmodeldb.info |
+| `nomos8kdat` | `4xNomos8kDAT.pth` | Highest single-frame quality — ~6× slower, best for short clips | ~22s/frame | openmodeldb.info |
+| `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4s/frame | openmodeldb.info |
+| `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on cleaner sources | ~4s/frame | huggingface.co/Kim2091/UltraSharp |
+| `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | ~4s/frame | github.com/xinntao/Real-ESRGAN/releases |
+| `hat` | `HAT-L_SRx4_ImageNet-pretrain.pth` | Highest fidelity, clean sources only | ~20s/frame | github.com/XPixelGroup/HAT/releases |
 
 Note: `hat` additionally requires `pip install spandrel-extra-arches` in the venv.
+
+### Temporal models (basicsr)
+
+Process a sliding window of frames simultaneously using optical flow. Produce better temporal consistency and less inter-frame flickering compared to single-frame models — especially beneficial for heavily compressed sources where individual frames contain correlated compression blocks.
+
+| Key | Filename | Best for | Download |
+|-----|----------|----------|----------|
+| `basicvsr` | `BasicVSR_PlusPlus_REDS4.pth` | Real-world degraded video, strong all-rounder | github.com/ckkelvinchan/BasicVSR_PlusPlus |
+| `realbasicvsr` | `RealBasicVSR_x4v2.pth` | Blind degradation — noisy/compressed sources | github.com/ckkelvinchan/RealBasicVSR |
+
+Temporal models require:
+1. `pip install basicsr` in the venv (handled by `install.sh`)
+2. SPyNet optical flow weights: `spynet_20210409-c6c1bd09.pth` in `~/ai-upscale/models/` — basicsr will attempt to download this automatically on first run
+
+All models are 4x. The script uses the model's native 4x output and resizes to your target resolution at the FFmpeg encode step.
 
 ## Basic Usage
 
@@ -61,7 +77,8 @@ Required:
   -r, --resolution RES      Target: 720p, 1080p, 1440p, 2160p
 
 Model:
-  -m, --model TYPE          nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat
+  -m, --model TYPE          nomos8k (default), span, nomos8kdat, lsdir, ultrasharp,
+                            realesrgan, hat, basicvsr, realbasicvsr
 
 Pre-processing:
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -72,15 +89,19 @@ Output:
   -q, --quality LEVEL       high (default, crf 16), medium (crf 20), low (crf 24)
   --sharpen                 Apply unsharp mask to final output
 
-Performance / quality:
+Performance / quality (single-frame models):
   -t, --tile SIZE           Tile size (auto-selected by source resolution — override if needed)
-                              512   auto for ≤720p and 1440p/2160p
-                              1024  auto for 1080p (2×2 tiles)
-                              0     Full-frame — RRDB models only (nomos8k, realesrgan,
-                                    lsdir, ultrasharp); do NOT use with nomos8kdat or hat
+                              0     auto for ≤720p — full-frame, RRDB models only
+                              1024  auto for 1080p — 2×2 tiles
+                              512   auto for 1440p/2160p — 3×3+ tiles
+                            Do NOT use 0 with transformer models (nomos8kdat, hat, span)
                             Reduce on low VRAM: 256, 128
   --tile-pad SIZE           Tile overlap padding (default: 64)
   --full-precision          Use float32 instead of float16
+
+Temporal model options:
+  --temporal-window N       Sliding window size in frames (default: 15)
+                            Larger = more temporal context + more VRAM. Reduce if OOM.
 
 Workflow:
   --resume                  Skip already-completed frames from an interrupted run
@@ -109,12 +130,26 @@ Prepends a yadif deinterlace pass before the prefilter. Use for interlaced sourc
 
 All models are 4x. Selection guide:
 
+**Single-frame (spandrel) — process one frame at a time:**
+
 - **nomos8k** — RRDB-based, trained on real-world degradations. Fast (~4s/frame on RTX 4060 Ti for 720p) and reliable. Best choice for batch processing full episodes or films. **Default.**
-- **nomos8kdat** — DAT transformer, same training data as nomos8k but higher quality. ~6x slower — practical for short clips or single scenes, not full episodes.
+- **span** — SPAN transformer trained on the same data as nomos8k. Better quality than nomos8k with similar speed (~5s/frame). Good upgrade choice if you want better results without a major speed penalty.
+- **nomos8kdat** — DAT transformer, same training data as nomos8k but higher quality. ~6× slower (~22s/frame) — practical for short clips or single scenes, not full episodes.
 - **lsdir** — tends to produce sharper edges and finer detail on detailed scenes.
 - **ultrasharp** — maximum perceived sharpness. Can over-sharpen on already-noisy sources.
 - **realesrgan** — the original RealESRGAN x4plus. Kept as a legacy fallback.
-- **hat** — Hybrid Attention Transformer. Highest fidelity model but designed for clean (lightly degraded) sources. Pair with `--prefilter none`.
+- **hat** — Hybrid Attention Transformer. Highest fidelity single-frame model but designed for clean (lightly degraded) sources. Pair with `--prefilter none`.
+
+**Temporal (basicsr) — process a sliding window of frames:**
+
+- **basicvsr** — BasicVSR++. Uses optical flow (SPyNet) to align and fuse information across multiple frames. Produces sharper, more temporally consistent results than any single-frame model, especially on compressed sources where blocks and noise are consistent across nearby frames.
+- **realbasicvsr** — RealBasicVSR. Built on the same BasicVSR++ backbone but specifically trained for blind real-world degradation. Strong choice for broadcast rips, streaming captures, and heavily compressed sources.
+
+Temporal models require `pip install basicsr` and the `spynet_20210409-c6c1bd09.pth` weights file — basicsr auto-downloads SPyNet on first use. See `--temporal-window` to control how many frames are processed in each pass.
+
+### --temporal-window
+
+Controls the sliding window size for temporal models (default: 15). A larger window gives the model more temporal context — better continuity for long smooth pans or slow-moving scenes — but uses more VRAM. Reduce to `7` or `5` if you hit out-of-memory errors.
 
 ### --tile / --tile-pad
 
@@ -128,7 +163,7 @@ Tile size is auto-selected based on the source resolution:
 
 Pass `-t SIZE` to override. Reduce to `256` or `128` if you hit VRAM limits. tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance; reduce to `--tile-pad 32` to save VRAM.
 
-> **Note on `-t 0` (full-frame):** Full-frame inference skips tiling entirely and processes the whole frame in one shot. This is faster for RRDB-based models (`nomos8k`, `realesrgan`, `lsdir`, `ultrasharp`) on ≤720p content with enough VRAM. However it is **not suitable for transformer models** (`nomos8kdat`, `hat`) — attention mechanisms make full-frame inference extremely slow and can produce NaN artefacts in float16 mode. Only use `-t 0` when explicitly running an RRDB model.
+> **Note on `-t 0` (full-frame):** Full-frame inference skips tiling entirely and processes the whole frame in one shot. This is faster for RRDB-based models (`nomos8k`, `realesrgan`, `lsdir`, `ultrasharp`) on ≤720p content with enough VRAM. However it is **not suitable for transformer models** (`span`, `nomos8kdat`, `hat`) — attention mechanisms make full-frame inference extremely slow and can produce NaN artefacts in float16 mode. Only use `-t 0` when explicitly running an RRDB model.
 
 ### --resume
 
@@ -149,13 +184,22 @@ Controls the HEVC output encode quality (CRF). Output is always HEVC 10-bit in a
 ## Examples
 
 ```bash
-# Standard compressed broadcast rip
+# Standard — compressed broadcast rip (nomos8k default)
 ./upscale_video.sh -i recording.mkv -r 1080p
+
+# SPAN — better quality than nomos8k, similar speed
+./upscale_video.sh -i recording.mkv -r 1080p -m span
+
+# Temporal — best for flickery/heavily compressed sources (requires basicsr)
+./upscale_video.sh -i recording.mkv -r 1080p -m realbasicvsr
+
+# Temporal with smaller window to save VRAM
+./upscale_video.sh -i recording.mkv -r 1080p -m basicvsr --temporal-window 7
 
 # Heavily degraded source — maximum pre-processing
 ./upscale_video.sh -i old_vhs.mkv -r 1080p --prefilter heavy --deinterlace
 
-# Clean source — highest quality model, no pre-processing
+# Clean source — highest quality single-frame model, no pre-processing
 ./upscale_video.sh -i bluray_rip.mkv -r 2160p -m hat --prefilter none
 
 # Low VRAM — reduce tile size
@@ -211,12 +255,16 @@ cd ~/ai-upscale
 ├── test.sh                 # Installation test script
 ├── venv/                   # Python virtual environment
 ├── models/                 # AI model files (.pth)
-│   ├── 4xNomos8kDAT.pth             ← default model
-│   ├── 4xNomos8kSC.pth
+│   ├── 4xNomos8kSC.pth              ← default model (nomos8k)
+│   ├── 4xNomos8kSCSPANPlus.pth      ← span
+│   ├── 4xNomos8kDAT.pth             ← nomos8kdat
 │   ├── 4xLSDIR.pth
 │   ├── 4x-UltraSharp.pth
 │   ├── RealESRGAN_x4plus.pth
-│   └── HAT-L_SRx4_ImageNet-pretrain.pth
+│   ├── HAT-L_SRx4_ImageNet-pretrain.pth
+│   ├── BasicVSR_PlusPlus_REDS4.pth  ← basicvsr (temporal)
+│   ├── RealBasicVSR_x4v2.pth        ← realbasicvsr (temporal)
+│   └── spynet_20210409-c6c1bd09.pth ← required by temporal models
 └── temp/                   # Temporary processing files (auto-created and deleted)
 ```
 
@@ -245,12 +293,24 @@ source ~/ai-upscale/venv/bin/activate
 pip install spandrel spandrel-extra-arches
 ```
 
+### basicsr not found (temporal models)
+```bash
+source ~/ai-upscale/venv/bin/activate
+pip install basicsr
+```
+
+### SPyNet weights missing (temporal models)
+basicsr will attempt to auto-download `spynet_20210409-c6c1bd09.pth` on first use. If that fails, download it manually from the basicsr/Real-ESRGAN release assets and place it in `~/ai-upscale/models/`.
+
 ### Out of VRAM
 ```bash
-# Reduce tile size
+# Reduce tile size (single-frame models)
 ./upscale_video.sh -i video.mkv -r 2160p -t 256
 # Or smaller still
 ./upscale_video.sh -i video.mkv -r 2160p -t 128
+
+# Reduce temporal window (temporal models)
+./upscale_video.sh -i video.mkv -r 1080p -m realbasicvsr --temporal-window 7
 ```
 
 ### libpng write errors during a run
@@ -267,7 +327,8 @@ sudo nvidia-smi -pl 165     # Set power limit (adjust to your GPU's TDP)
 - FFmpeg (system)
 - Python 3.12 + venv
 - PyTorch with CUDA
-- spandrel + spandrel-extra-arches
+- spandrel + spandrel-extra-arches (single-frame models)
+- basicsr (temporal models: basicvsr, realbasicvsr)
 - opencv-python, numpy, tqdm
 
 ## Credits
@@ -275,7 +336,10 @@ sudo nvidia-smi -pl 165     # Set power limit (adjust to your GPU's TDP)
 - spandrel: github.com/chaiNNer-org/spandrel
 - Real-ESRGAN: github.com/xinntao/Real-ESRGAN
 - HAT: github.com/XPixelGroup/HAT
-- 4xNomos8kSC / 4xLSDIR: github.com/Phhofm/models
+- BasicVSR++: github.com/ckkelvinchan/BasicVSR_PlusPlus
+- RealBasicVSR: github.com/ckkelvinchan/RealBasicVSR
+- basicsr: github.com/XPixelGroup/BasicSR
+- 4xNomos8kSC / 4xNomos8kSCSPANPlus / 4xLSDIR: github.com/Phhofm/models
 - 4x-UltraSharp: huggingface.co/Kim2091
 - FFmpeg: ffmpeg.org
 - PyTorch: pytorch.org

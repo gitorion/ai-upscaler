@@ -190,6 +190,10 @@ setup_ai_upscale() {
     pip install tqdm
     pip install numpy
 
+    print_info "Installing basicsr (required for temporal models: basicvsr, realbasicvsr)..."
+    # basicsr may emit harmless deprecation warnings during install — these are safe to ignore
+    pip install basicsr 2>&1 | grep -v "UserWarning\|FutureWarning\|DeprecationWarning" || true
+
     print_success "Python environment configured"
 
     # Verify CUDA availability

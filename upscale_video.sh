@@ -1,8 +1,9 @@
 #!/bin/bash
 
 ##############################################################################
-# AI Video Upscaler — spandrel edition
-# Models: nomos8k (default), lsdir, ultrasharp, realesrgan, hat
+# AI Video Upscaler — spandrel + basicsr edition
+# Single-frame models: nomos8k (default), span, nomos8kdat, lsdir, ultrasharp, realesrgan, hat
+# Temporal models:     basicvsr, realbasicvsr  (multi-frame, requires basicsr)
 # Optimised for live-action, compressed/noisy, artifact-heavy sources
 # Requires: FFmpeg, Python 3, spandrel, CUDA GPU
 ##############################################################################
@@ -35,15 +36,27 @@ SHARPEN=false
 FULL_PRECISION=false
 KEEP_TEMP=false
 UPSCALE_SOURCE=""
+IS_TEMPORAL=false
+TEMPORAL_WINDOW=15
+SPYNET_PATH=""
 
-# ── Model registry (all 4x; outscale handles sub-4x targets) ──────────────────
+# ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
 declare -A MODEL_FILES=(
-    [nomos8kdat]="4xNomos8kDAT.pth"
     [nomos8k]="4xNomos8kSC.pth"
+    [span]="4xNomos8kSCSPANPlus.pth"
+    [nomos8kdat]="4xNomos8kDAT.pth"
     [lsdir]="4xLSDIR.pth"
     [ultrasharp]="4x-UltraSharp.pth"
     [realesrgan]="RealESRGAN_x4plus.pth"
     [hat]="HAT-L_SRx4_ImageNet-pretrain.pth"
+)
+
+# ── Temporal model registry (basicsr) — all 4x ───────────────────────────────
+# These models process sliding windows of frames for temporal consistency.
+# Requires: pip install basicsr  +  spynet_20210409-c6c1bd09.pth in models/
+declare -A TEMPORAL_MODEL_FILES=(
+    [basicvsr]="BasicVSR_PlusPlus_REDS4.pth"
+    [realbasicvsr]="RealBasicVSR_x4v2.pth"
 )
 
 ##############################################################################
@@ -57,7 +70,7 @@ print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
 usage() {
     cat << EOF
-${GREEN}AI Video Upscaler${NC} — spandrel edition, live-action optimised
+${GREEN}AI Video Upscaler${NC} — spandrel + basicsr edition, live-action optimised
 
 Usage: $0 -i INPUT -r RESOLUTION [OPTIONS]
 
@@ -65,14 +78,24 @@ Required:
   -i, --input FILE          Input video file
   -r, --resolution RES      Target resolution: 720p, 1080p, 1440p, 2160p
 
-Model selection:
-  -m, --model TYPE          Upscale model (default: nomos8k)
-                              nomos8k    Best all-round for compressed live-action  ← default
-                              nomos8kdat DAT transformer — higher quality but ~6x slower
-                              lsdir      Sharp detail, handles real-world degradations
-                              ultrasharp Maximum sharpness (better on cleaner sources)
-                              realesrgan Real-ESRGAN x4plus (legacy fallback)
-                              hat        HAT-L transformer — highest fidelity, clean sources only
+Model selection (-m / --model):
+  ── Single-frame models (spandrel) ──────────────────────────────────────────
+  nomos8k     Best all-round for compressed live-action — fast (~4s/frame)  ← default
+  span        SPAN transformer — better quality than nomos8k, still fast (~5s/frame)
+  nomos8kdat  DAT transformer — highest single-frame quality, ~6× slower (~22s/frame)
+  lsdir       Sharp detail, handles real-world degradations
+  ultrasharp  Maximum sharpness (better on cleaner sources)
+  realesrgan  Real-ESRGAN x4plus (legacy fallback)
+  hat         HAT-L — highest fidelity single-frame, clean sources only
+
+  ── Temporal models (basicsr) — multi-frame, best temporal consistency ─────
+  basicvsr    BasicVSR++ — strong on real-world degraded video  (requires basicsr)
+  realbasicvsr  RealBasicVSR — tuned for blind degradation  (requires basicsr)
+
+  Temporal models process a sliding window of frames simultaneously using optical
+  flow, producing sharper results with far less frame-to-frame flickering.
+  Requires: pip install basicsr  +  spynet_20210409-c6c1bd09.pth in models/
+  See --temporal-window to adjust window size.
 
 Pre-processing (applied before AI upscaling to clean degraded sources):
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -87,7 +110,7 @@ Output:
   -q, --quality QUALITY     high (crf 16), medium (crf 20), low (crf 24) [default: high]
   --sharpen                 Apply mild unsharp mask to final output
 
-Performance / quality:
+Performance / quality (single-frame models only):
   -t, --tile SIZE           Tile size for GPU processing (auto by source resolution)
                               0      Full-frame — no tiling (auto for ≤720p, RRDB models only)
                               1024   2×2 tiles (auto for 1080p)
@@ -98,6 +121,10 @@ Performance / quality:
                             Increase to reduce seam artifacts; decrease to save VRAM
   --full-precision          Use float32 instead of float16 (marginal quality gain, uses more VRAM)
 
+Temporal model options:
+  --temporal-window N       Sliding window size in frames (default: 15)
+                            Larger = more temporal context, more VRAM. Reduce if OOM.
+
 Workflow:
   --resume                  Resume interrupted run — skip already-completed frames
   --keep-temp               Keep temporary files after completion
@@ -107,11 +134,20 @@ Examples:
   # Standard — compressed broadcast or web download
   $0 -i film.mkv -r 1080p
 
+  # SPAN — better quality than nomos8k, similar speed
+  $0 -i film.mkv -r 1080p -m span
+
+  # Temporal — best for flickery/heavily compressed sources
+  $0 -i film.mkv -r 1080p -m realbasicvsr
+
+  # Temporal with smaller window (reduces VRAM)
+  $0 -i film.mkv -r 1080p -m basicvsr --temporal-window 7
+
   # Heavily degraded source
   $0 -i old_capture.mkv -r 1080p --prefilter heavy --deinterlace
 
-  # Clean source, highest fidelity model
-  $0 -i bluray_rip.mkv -r 2160p -m hat --prefilter light
+  # Clean source, highest fidelity single-frame model
+  $0 -i bluray_rip.mkv -r 2160p -m hat --prefilter none
 
   # Resume an interrupted run
   $0 -i film.mkv -r 1080p --resume
@@ -120,12 +156,20 @@ Examples:
   $0 -i film.mkv -r 2160p -t 256 --sharpen
 
 Model downloads (place .pth files in $MODEL_DIR):
-  nomos8k    https://github.com/Phhofm/models              → 4xNomos8kSC.pth
-  lsdir      https://github.com/Phhofm/models              → 4xLSDIR.pth
-  ultrasharp https://huggingface.co/Kim2091/UltraSharp     → 4x-UltraSharp.pth
-  realesrgan https://github.com/xinntao/Real-ESRGAN        → RealESRGAN_x4plus.pth
-  hat        https://github.com/XPixelGroup/HAT/releases   → HAT-L_SRx4_ImageNet-pretrain.pth
-             (requires: pip install spandrel-extra-arches)
+  nomos8k      openmodeldb.info                           → 4xNomos8kSC.pth
+  span         openmodeldb.info                           → 4xNomos8kSCSPANPlus.pth
+  nomos8kdat   openmodeldb.info                           → 4xNomos8kDAT.pth
+  lsdir        github.com/Phhofm/models                  → 4xLSDIR.pth
+  ultrasharp   huggingface.co/Kim2091/UltraSharp          → 4x-UltraSharp.pth
+  realesrgan   github.com/xinntao/Real-ESRGAN             → RealESRGAN_x4plus.pth
+  hat          github.com/XPixelGroup/HAT/releases        → HAT-L_SRx4_ImageNet-pretrain.pth
+               (requires: pip install spandrel-extra-arches)
+  basicvsr     github.com/ckkelvinchan/BasicVSR_PlusPlus  → BasicVSR_PlusPlus_REDS4.pth
+               (requires: pip install basicsr)
+  realbasicvsr github.com/ckkelvinchan/RealBasicVSR       → RealBasicVSR_x4v2.pth
+               (requires: pip install basicsr)
+  spynet       Required by both temporal models           → spynet_20210409-c6c1bd09.pth
+               (downloaded automatically by basicsr on first use)
 EOF
     exit 0
 }
@@ -241,21 +285,43 @@ calculate_scale() {
 }
 
 select_model() {
-    if [[ -z "${MODEL_FILES[$MODEL_KEY]+_}" ]]; then
-        print_error "Unknown model: $MODEL_KEY"
-        print_error "Available: ${!MODEL_FILES[*]}"
-        exit 1
+    # Check single-frame registry (spandrel)
+    if [[ -n "${MODEL_FILES[$MODEL_KEY]+_}" ]]; then
+        IS_TEMPORAL=false
+        MODEL_PATH="$MODEL_DIR/${MODEL_FILES[$MODEL_KEY]}"
+        if [[ ! -f "$MODEL_PATH" ]]; then
+            print_error "Model not found: $MODEL_PATH"
+            print_error "Download it and place in: $MODEL_DIR  (see --help for URLs)"
+            exit 1
+        fi
+        print_info "Model: $MODEL_KEY  (${MODEL_FILES[$MODEL_KEY]})  [single-frame]"
+        return
     fi
 
-    MODEL_PATH="$MODEL_DIR/${MODEL_FILES[$MODEL_KEY]}"
-
-    if [[ ! -f "$MODEL_PATH" ]]; then
-        print_error "Model not found: $MODEL_PATH"
-        print_error "Download it and place in: $MODEL_DIR  (see --help for URLs)"
-        exit 1
+    # Check temporal registry (basicsr)
+    if [[ -n "${TEMPORAL_MODEL_FILES[$MODEL_KEY]+_}" ]]; then
+        IS_TEMPORAL=true
+        MODEL_PATH="$MODEL_DIR/${TEMPORAL_MODEL_FILES[$MODEL_KEY]}"
+        SPYNET_PATH="$MODEL_DIR/spynet_20210409-c6c1bd09.pth"
+        if [[ ! -f "$MODEL_PATH" ]]; then
+            print_error "Temporal model not found: $MODEL_PATH"
+            print_error "Download it and place in: $MODEL_DIR  (see --help for URLs)"
+            exit 1
+        fi
+        if [[ ! -f "$SPYNET_PATH" ]]; then
+            print_warning "SPyNet weights not found at: $SPYNET_PATH"
+            print_warning "basicsr will attempt to download them automatically on first run."
+            print_warning "If this fails: download spynet_20210409-c6c1bd09.pth manually to $MODEL_DIR"
+            SPYNET_PATH=""  # let basicsr handle auto-download
+        fi
+        print_info "Model: $MODEL_KEY  (${TEMPORAL_MODEL_FILES[$MODEL_KEY]})  [temporal/multi-frame]"
+        return
     fi
 
-    print_info "Model: $MODEL_KEY  (${MODEL_FILES[$MODEL_KEY]})"
+    print_error "Unknown model: $MODEL_KEY"
+    print_error "Single-frame (spandrel): ${!MODEL_FILES[*]}"
+    print_error "Temporal (basicsr):      ${!TEMPORAL_MODEL_FILES[*]}"
+    exit 1
 }
 
 run_prefilter() {
@@ -649,30 +715,265 @@ if __name__ == '__main__':
 PYTHON_EOF
 }
 
+write_temporal_python_script() {
+    cat > "$TEMP_DIR/upscale_temporal.py" << 'TEMPORAL_EOF'
+import sys
+import os
+import importlib
+import cv2
+import torch
+import numpy as np
+from tqdm import tqdm
+
+# ── Temporal model configs ─────────────────────────────────────────────────────
+# arch_module / arch_class must match the basicsr package layout.
+# params are passed to the constructor; spynet_path is added at load time.
+TEMPORAL_MODEL_CONFIGS = {
+    'basicvsr': {
+        'arch_module': 'basicsr.archs.basicvsr_pp_arch',
+        'arch_class':  'BasicVSRPlusPlus',
+        'params': {'mid_channels': 64, 'num_blocks': 7, 'is_low_res_input': True},
+    },
+    'realbasicvsr': {
+        'arch_module': 'basicsr.archs.real_basicvsr_arch',
+        'arch_class':  'RealBasicVSR',
+        'params': {'num_feat': 64, 'num_block': 9, 'is_low_res_input': True},
+    },
+}
+
+MODEL_SCALE = 4   # all supported temporal models output 4×
+
+
+def load_temporal_model(model_key, model_path, spynet_path, device, use_half):
+    cfg = TEMPORAL_MODEL_CONFIGS[model_key]
+    module = importlib.import_module(cfg['arch_module'])
+    arch_cls = getattr(module, cfg['arch_class'])
+
+    params = dict(cfg['params'])
+    # Pass SPyNet path — empty string means basicsr will attempt auto-download
+    params['spynet_path'] = spynet_path if spynet_path else None
+
+    model = arch_cls(**params)
+
+    state = torch.load(model_path, map_location='cpu')
+    # Different checkpoints store weights under different top-level keys
+    for key in ('params_ema', 'params', 'state_dict'):
+        if key in state:
+            state = state[key]
+            break
+
+    model.load_state_dict(state, strict=True)
+    model = model.eval().to(device)
+    if use_half:
+        model = model.half()
+
+    return model
+
+
+def frame_to_tensor(frame, device, use_half):
+    """cv2 BGR uint8 HWC → CHW float [0,1] on device."""
+    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    t = torch.from_numpy(img).permute(2, 0, 1)
+    if use_half:
+        t = t.half()
+    return t.to(device, non_blocking=True)
+
+
+def tensor_to_frame(t):
+    """CHW float tensor → cv2 BGR uint8 HWC frame."""
+    raw = t.float()
+    if not torch.isfinite(raw).all():
+        raw = torch.nan_to_num(raw, nan=0.0, posinf=1.0, neginf=0.0)
+    out = raw.cpu().clamp(0, 1)
+    return cv2.cvtColor(
+        (out.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8),
+        cv2.COLOR_RGB2BGR,
+    )
+
+
+def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path,
+                     window_size, output_w, output_h, use_full_precision, resume):
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    use_half = (not use_full_precision) and (device == 'cuda')
+    print(f"Device: {device}  |  Precision: {'float16' if use_half else 'float32'}")
+    print(f"Loading temporal model: {os.path.basename(model_path)}")
+
+    model = load_temporal_model(model_key, model_path, spynet_path, device, use_half)
+
+    os.makedirs(frames_dir, exist_ok=True)
+
+    cap = cv2.VideoCapture(input_video)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
+        fh.write(str(fps))
+
+    # Resume: if all expected frames already exist, skip entirely
+    if resume:
+        existing = [f for f in os.listdir(frames_dir)
+                    if f.startswith('frame_') and f.endswith('.png')]
+        if len(existing) >= max(total_frames, 1):
+            print(f"Resume: {len(existing)} frames already present — skipping upscale")
+            cap.release()
+            return True
+
+    # ── Streaming sliding-window inference ────────────────────────────────────
+    # The model processes a window of `window_size` frames at once.
+    # We keep OVERLAP frames of past context and read-ahead for future context
+    # so boundaries between windows have full neighbour information.
+    #
+    #  window = [past_overlap | new_frames | future_overlap]
+    #  valid output = output[past_overlap : past_overlap + new_frames]
+    #
+    # Only `window_size` raw frames are in RAM at any moment.
+    # ─────────────────────────────────────────────────────────────────────────
+    OVERLAP = min(2, window_size // 4)
+    stride  = max(1, window_size - 2 * OVERLAP)
+
+    print(f"Temporal window: {window_size}  |  Overlap: {OVERLAP}  |  Stride: {stride}")
+    print(f"Output: {output_w}×{output_h}")
+
+    def read_n(n):
+        frames = []
+        for _ in range(n):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames.append(frame)
+        return frames
+
+    # Prime: read first full window
+    window = read_n(window_size)
+    if not window:
+        cap.release()
+        return False
+
+    eof = len(window) < window_size
+    # Pad a short first window with copies of the first frame
+    while len(window) < window_size:
+        window.insert(0, window[0])
+
+    output_idx = 0
+    is_first   = True
+
+    with tqdm(total=total_frames if total_frames > 0 else None,
+              desc="Upscaling frames (temporal)", unit="frame") as pbar:
+        while True:
+            # Build [1, T, C, H, W] batch
+            tensors = torch.stack(
+                [frame_to_tensor(f, device, use_half) for f in window], dim=0
+            ).unsqueeze(0)
+
+            with torch.no_grad():
+                out_batch = model(tensors)  # [1, T, C, 4H, 4W]
+
+            # Which frames from this window are "valid" output?
+            valid_start = 0 if is_first else OVERLAP
+            valid_end   = len(window) if eof else len(window) - OVERLAP
+
+            for j in range(valid_start, valid_end):
+                out_frame = tensor_to_frame(out_batch[0, j])
+
+                src_h = window[j].shape[0]
+                if out_frame.shape[0] != output_h or out_frame.shape[1] != output_w:
+                    interp = (cv2.INTER_AREA if output_h < src_h * MODEL_SCALE
+                              else cv2.INTER_LANCZOS4)
+                    out_frame = cv2.resize(out_frame, (output_w, output_h),
+                                           interpolation=interp)
+
+                frame_path = os.path.join(frames_dir, f'frame_{output_idx:08d}.png')
+                cv2.imwrite(frame_path, out_frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                output_idx += 1
+                pbar.update(1)
+
+            if eof:
+                break
+
+            is_first = False
+
+            # Slide: keep trailing OVERLAP frames as leading context for next window
+            context    = window[-OVERLAP:]
+            new_frames = read_n(stride)
+            if len(new_frames) < stride:
+                eof = True
+            window = context + new_frames
+
+    cap.release()
+    return output_idx > 0
+
+
+if __name__ == '__main__':
+    _, input_video, frames_dir, model_key, model_path, spynet_path, \
+        window_size, output_w, output_h, \
+        use_full_precision_str, resume_str = sys.argv
+
+    success = upscale_temporal(
+        input_video        = input_video,
+        frames_dir         = frames_dir,
+        model_key          = model_key,
+        model_path         = model_path,
+        spynet_path        = spynet_path,
+        window_size        = int(window_size),
+        output_w           = int(output_w),
+        output_h           = int(output_h),
+        use_full_precision = (use_full_precision_str == 'true'),
+        resume             = (resume_str == 'true'),
+    )
+    sys.exit(0 if success else 1)
+TEMPORAL_EOF
+}
+
 upscale_video() {
     local output_file="$1"
     local frames_dir="$TEMP_DIR/frames"
 
     mkdir -p "$frames_dir"
     source "$VENV_DIR/bin/activate"
-    write_python_script
 
-    print_info "Starting AI upscaling..."
-    local tile_note="$TILE_SIZE"
-    [[ "$TILE_SIZE" == "0" ]] && tile_note="0 (full-frame)"
-    [[ "$TILE_SIZE_EXPLICIT" == false ]] && tile_note+=" (auto)"
-    print_info "Model: $MODEL_KEY  |  Tile: ${tile_note}  |  Tile-pad: ${TILE_PAD}  |  Prefilter: ${PREFILTER}"
+    if [[ "$IS_TEMPORAL" == true ]]; then
+        # Temporal pipeline — basicsr multi-frame models
+        if ! "$VENV_DIR/bin/python3" -c "import basicsr" &>/dev/null; then
+            print_error "basicsr not installed — required for temporal models (basicvsr, realbasicvsr)"
+            print_error "Fix: source $VENV_DIR/bin/activate && pip install basicsr"
+            exit 1
+        fi
+        write_temporal_python_script
+        print_info "Starting temporal AI upscaling..."
+        print_info "Model: $MODEL_KEY  |  Window: ${TEMPORAL_WINDOW} frames  |  Prefilter: ${PREFILTER}"
 
-    "$VENV_DIR/bin/python3" "$TEMP_DIR/upscale.py" \
-        "$UPSCALE_SOURCE" \
-        "$frames_dir" \
-        "$MODEL_PATH" \
-        "$TILE_SIZE" \
-        "$TILE_PAD" \
-        "$OUTPUT_WIDTH" \
-        "$OUTPUT_HEIGHT" \
-        "$FULL_PRECISION" \
-        "$RESUME"
+        "$VENV_DIR/bin/python3" "$TEMP_DIR/upscale_temporal.py" \
+            "$UPSCALE_SOURCE" \
+            "$frames_dir" \
+            "$MODEL_KEY" \
+            "$MODEL_PATH" \
+            "${SPYNET_PATH:-}" \
+            "$TEMPORAL_WINDOW" \
+            "$OUTPUT_WIDTH" \
+            "$OUTPUT_HEIGHT" \
+            "$FULL_PRECISION" \
+            "$RESUME"
+    else
+        # Single-frame pipeline — spandrel models
+        write_python_script
+        local tile_note="$TILE_SIZE"
+        [[ "$TILE_SIZE" == "0" ]] && tile_note="0 (full-frame)"
+        [[ "$TILE_SIZE_EXPLICIT" == false ]] && tile_note+=" (auto)"
+        print_info "Starting AI upscaling..."
+        print_info "Model: $MODEL_KEY  |  Tile: ${tile_note}  |  Tile-pad: ${TILE_PAD}  |  Prefilter: ${PREFILTER}"
+
+        "$VENV_DIR/bin/python3" "$TEMP_DIR/upscale.py" \
+            "$UPSCALE_SOURCE" \
+            "$frames_dir" \
+            "$MODEL_PATH" \
+            "$TILE_SIZE" \
+            "$TILE_PAD" \
+            "$OUTPUT_WIDTH" \
+            "$OUTPUT_HEIGHT" \
+            "$FULL_PRECISION" \
+            "$RESUME"
+    fi
 
     print_success "Upscaling complete"
     encode_output "$frames_dir" "$output_file"
@@ -772,19 +1073,20 @@ RESOLUTION=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -i|--input)       INPUT_FILE="$2";      shift 2 ;;
-        -o|--output)      OUTPUT_FILE="$2";     shift 2 ;;
-        -r|--resolution)  RESOLUTION="$2";      shift 2 ;;
-        -m|--model)       MODEL_KEY="$2";       shift 2 ;;
-        -t|--tile)        TILE_SIZE="$2"; TILE_SIZE_EXPLICIT=true; shift 2 ;;
-        --tile-pad)       TILE_PAD="$2";        shift 2 ;;
-        -q|--quality)     QUALITY="$2";         shift 2 ;;
-        --prefilter)      PREFILTER="$2";       shift 2 ;;
-        --deinterlace)    DEINTERLACE=true;     shift   ;;
-        --resume)         RESUME=true;          shift   ;;
-        --sharpen)        SHARPEN=true;         shift   ;;
-        --full-precision) FULL_PRECISION=true;  shift   ;;
-        --keep-temp)      KEEP_TEMP=true;       shift   ;;
+        -i|--input)          INPUT_FILE="$2";      shift 2 ;;
+        -o|--output)         OUTPUT_FILE="$2";     shift 2 ;;
+        -r|--resolution)     RESOLUTION="$2";      shift 2 ;;
+        -m|--model)          MODEL_KEY="$2";       shift 2 ;;
+        -t|--tile)           TILE_SIZE="$2"; TILE_SIZE_EXPLICIT=true; shift 2 ;;
+        --tile-pad)          TILE_PAD="$2";        shift 2 ;;
+        --temporal-window)   TEMPORAL_WINDOW="$2"; shift 2 ;;
+        -q|--quality)        QUALITY="$2";         shift 2 ;;
+        --prefilter)         PREFILTER="$2";       shift 2 ;;
+        --deinterlace)       DEINTERLACE=true;     shift   ;;
+        --resume)            RESUME=true;          shift   ;;
+        --sharpen)           SHARPEN=true;         shift   ;;
+        --full-precision)    FULL_PRECISION=true;  shift   ;;
+        --keep-temp)         KEEP_TEMP=true;       shift   ;;
         -h|--help)        usage ;;
         *)
             print_error "Unknown option: $1"
@@ -819,6 +1121,7 @@ if [[ "$RESUME" == false ]]; then
     rm -rf "$TEMP_DIR/frames"
     rm -f  "$TEMP_DIR/cleaned_source.mkv"
     rm -f  "$TEMP_DIR/upscale.py"
+    rm -f  "$TEMP_DIR/upscale_temporal.py"
     rm -f  "$TEMP_DIR/audio.mka"
 fi
 
@@ -831,25 +1134,25 @@ print_info ""
 
 check_dependencies
 get_video_info "$INPUT_FILE"
-
-# Auto-select tile size based on source resolution if the user didn't override with -t.
-# Full-frame (tile=0) is only beneficial for RRDB-based models (nomos8k, realesrgan,
-# lsdir, ultrasharp) — transformer models (nomos8kdat, hat) run dramatically slower
-# with full-frame inference due to their attention mechanisms. Use -t 0 explicitly
-# only when running an RRDB model where you want maximum speed on ≤720p content.
-if [[ "$TILE_SIZE_EXPLICIT" == false ]]; then
-    if (( INPUT_HEIGHT <= 720 )); then
-        TILE_SIZE=0        # full-frame inference — fastest for RRDB models on ≤720p with 16GB VRAM
-    elif (( INPUT_HEIGHT <= 1080 )); then
-        TILE_SIZE=1024     # 2×2 tiles for 1080p
-    fi
-    # 1440p / 2160p keep the 512 default
-fi
-
 calculate_scale "$RESOLUTION"
 
 if [[ "$USE_AI" == true ]]; then
     select_model
+
+    # Auto-select tile size for single-frame models (not used by temporal pipeline).
+    # Full-frame (tile=0) is only beneficial for RRDB-based models (nomos8k, realesrgan,
+    # lsdir, ultrasharp) — transformer models (nomos8kdat, hat, span) run dramatically
+    # slower at tile=0 due to attention mechanisms. Use -t 0 explicitly only when you
+    # know you are running an RRDB model and have enough VRAM.
+    if [[ "$IS_TEMPORAL" == false && "$TILE_SIZE_EXPLICIT" == false ]]; then
+        if (( INPUT_HEIGHT <= 720 )); then
+            TILE_SIZE=0        # full-frame — fastest for RRDB models on ≤720p with 16GB VRAM
+        elif (( INPUT_HEIGHT <= 1080 )); then
+            TILE_SIZE=1024     # 2×2 tiles for 1080p
+        fi
+        # 1440p / 2160p keep the 512 default
+    fi
+
     extract_audio "$INPUT_FILE"
     run_prefilter "$INPUT_FILE"
     upscale_video "$OUTPUT_FILE"
