@@ -48,7 +48,7 @@ Process a sliding window of frames simultaneously using optical flow. Produce be
 | Key | Filename | Best for | Download |
 |-----|----------|----------|----------|
 | `basicvsr` | `BasicVSR_PlusPlus_REDS4.pth` | Real-world degraded video, strong all-rounder | github.com/ckkelvinchan/BasicVSR_PlusPlus (rename after download) |
-| `realbasicvsr` | `RealBasicVSR.pth` | Blind degradation — noisy/compressed sources | github.com/ckkelvinchan/RealBasicVSR |
+| `realbasicvsr` | `RealBasicVSR_x4.pth` | Blind degradation — noisy/compressed sources | github.com/ckkelvinchan/RealBasicVSR |
 
 Temporal models require:
 1. `pip install basicsr` in the venv (handled by `install.sh`)
@@ -257,7 +257,7 @@ cd ~/ai-upscale
 │   ├── RealESRGAN_x4plus.pth
 │   ├── HAT-L_SRx4_ImageNet-pretrain.pth
 │   ├── BasicVSR_PlusPlus_REDS4.pth  ← basicvsr (temporal, rename after download)
-│   ├── RealBasicVSR.pth             ← realbasicvsr (temporal)
+│   ├── RealBasicVSR_x4.pth          ← realbasicvsr (temporal)
 │   └── spynet_20210409-c6c1bd09.pth ← required by temporal models
 └── temp/                   # Temporary processing files (auto-created and deleted)
 ```

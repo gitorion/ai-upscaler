@@ -55,7 +55,7 @@ declare -A MODEL_FILES=(
 # Requires: pip install basicsr  +  spynet_20210409-c6c1bd09.pth in models/
 declare -A TEMPORAL_MODEL_FILES=(
     [basicvsr]="BasicVSR_PlusPlus_REDS4.pth"
-    [realbasicvsr]="RealBasicVSR.pth"
+    [realbasicvsr]="RealBasicVSR_x4.pth"
 )
 
 ##############################################################################
@@ -161,7 +161,7 @@ Model downloads (place .pth files in $MODEL_DIR):
   basicvsr     github.com/ckkelvinchan/BasicVSR_PlusPlus  → BasicVSR_PlusPlus_REDS4.pth
                (download as basicvsr_plusplus_c64n7_...pth, rename to BasicVSR_PlusPlus_REDS4.pth)
                (requires: pip install basicsr)
-  realbasicvsr github.com/ckkelvinchan/RealBasicVSR       → RealBasicVSR.pth
+  realbasicvsr github.com/ckkelvinchan/RealBasicVSR       → RealBasicVSR_x4.pth
                (requires: pip install basicsr)
   spynet       Required by both temporal models           → spynet_20210409-c6c1bd09.pth
                (downloaded automatically by basicsr on first use)
