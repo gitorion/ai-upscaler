@@ -728,10 +728,47 @@ TEMPORAL_MODEL_CONFIGS = {
         'arch_class':  'BasicVSRPlusPlus',
         'params': {'mid_channels': 64, 'num_blocks': 7, 'is_low_res_input': True},
         'ckpt_prefix': 'generator.',   # mmediting wraps BasicVSRPlusPlus in a BasicVSR model
+        'remap': 'basicvsrpp_mmediting',  # key names differ between mmediting and basicsr 1.4.x
     },
 }
 
 MODEL_SCALE = 4   # all supported temporal models output 4×
+
+
+import re
+
+def _remap_basicvsrpp_mmediting(state):
+    """
+    Remap mmediting-era BasicVSR++ checkpoint keys to match current basicsr 1.4.x arch.
+
+    Two structural changes between the mmediting training codebase and current basicsr:
+
+    1. SpyNet: old arch used ConvModule wrappers, adding a '.conv.' sub-key.
+       Current basicsr uses a plain nn.Sequential where Conv2d sits at even indices.
+         old: spynet.basic_module.N.basic_module.M.conv.{weight,bias}
+         new: spynet.basic_module.N.basic_module.{M*2}.{weight,bias}
+
+    2. Upsampling: old arch used PixelShufflePack (.upsample_conv).
+       Current basicsr uses plain ConvTranspose2d named upconv1/upconv2.
+         old: upsample{N}.upsample_conv.{weight,bias}
+         new: upconv{N}.{weight,bias}
+    """
+    spynet_re = re.compile(
+        r'^(spynet\.basic_module\.\d+\.basic_module\.)(\d+)\.conv\.(weight|bias)$'
+    )
+    upsample_re = re.compile(r'^upsample(\d+)\.upsample_conv\.(weight|bias)$')
+    out = {}
+    for k, v in state.items():
+        m = spynet_re.match(k)
+        if m:
+            out[f"{m.group(1)}{int(m.group(2)) * 2}.{m.group(3)}"] = v
+            continue
+        m = upsample_re.match(k)
+        if m:
+            out[f"upconv{m.group(1)}.{m.group(2)}"] = v
+            continue
+        out[k] = v
+    return out
 
 
 def load_temporal_model(model_key, model_path, spynet_path, device, use_half):
@@ -740,9 +777,8 @@ def load_temporal_model(model_key, model_path, spynet_path, device, use_half):
     arch_cls = getattr(module, cfg['arch_class'])
 
     params = dict(cfg['params'])
-    # Pass spynet_path=None so basicsr doesn't load SPyNet separately.
-    # The mmediting REDS4 checkpoint embeds SPyNet weights under generator.spynet.*,
-    # which are loaded by load_state_dict below after the prefix strip.
+    # Pass spynet_path=None — the mmediting REDS4 checkpoint embeds SPyNet weights
+    # under generator.spynet.*, loaded via load_state_dict below.
     params['spynet_path'] = None
 
     model = arch_cls(**params)
@@ -765,6 +801,10 @@ def load_temporal_model(model_key, model_path, spynet_path, device, use_half):
         state = {k[len(prefix):]: v
                  for k, v in state.items()
                  if k.startswith(prefix)}
+
+    # Remap mmediting-era key names to match current basicsr arch definitions.
+    if cfg.get('remap') == 'basicvsrpp_mmediting':
+        state = _remap_basicvsrpp_mmediting(state)
 
     model.load_state_dict(state, strict=True)
     model = model.eval().to(device)
