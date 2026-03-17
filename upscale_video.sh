@@ -718,6 +718,10 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
+# Reduce CUDA memory fragmentation. BasicVSR++ makes many large allocations during
+# propagation; expandable segments lets PyTorch reuse fragmented reserved blocks.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 # ── Patch basicsr flow_warp for half-precision compatibility ───────────────────
 # basicsr's flow_warp() explicitly casts its coordinate grid to float32 (.float()),
 # which causes F.grid_sample to fail when feature maps are float16.
