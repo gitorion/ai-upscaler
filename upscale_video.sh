@@ -721,8 +721,11 @@ from tqdm import tqdm
 # ── Patch basicsr flow_warp for half-precision compatibility ───────────────────
 # basicsr's flow_warp() explicitly casts its coordinate grid to float32 (.float()),
 # which causes F.grid_sample to fail when feature maps are float16.
-# We patch it to upcast both tensors to float32 for the warp, then convert back.
+# spynet_arch and basicvsrpp_arch both do `from arch_util import flow_warp` at
+# import time, so we must patch the name in each module's own namespace.
 import basicsr.archs.arch_util as _bsr_arch_util
+import basicsr.archs.spynet_arch as _bsr_spynet_arch
+import basicsr.archs.basicvsrpp_arch as _bsr_basicvsrpp_arch
 _orig_flow_warp = _bsr_arch_util.flow_warp
 def _flow_warp_half_safe(x, flow, interp_mode='bilinear', padding_mode='zeros', align_corners=True):
     orig_dtype = x.dtype
@@ -732,6 +735,8 @@ def _flow_warp_half_safe(x, flow, interp_mode='bilinear', padding_mode='zeros', 
     out = _orig_flow_warp(x, flow, interp_mode=interp_mode, padding_mode=padding_mode, align_corners=align_corners)
     return out.to(orig_dtype)
 _bsr_arch_util.flow_warp = _flow_warp_half_safe
+_bsr_spynet_arch.flow_warp = _flow_warp_half_safe
+_bsr_basicvsrpp_arch.flow_warp = _flow_warp_half_safe
 
 # ── Temporal model configs ─────────────────────────────────────────────────────
 # arch_module / arch_class confirmed against basicsr 1.4.2 source.
