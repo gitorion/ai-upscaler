@@ -740,7 +740,10 @@ def load_temporal_model(model_key, model_path, spynet_path, device, use_half):
     arch_cls = getattr(module, cfg['arch_class'])
 
     params = dict(cfg['params'])
-    params['spynet_path'] = spynet_path if spynet_path else None
+    # Pass spynet_path=None so basicsr doesn't load SPyNet separately.
+    # The mmediting REDS4 checkpoint embeds SPyNet weights under generator.spynet.*,
+    # which are loaded by load_state_dict below after the prefix strip.
+    params['spynet_path'] = None
 
     model = arch_cls(**params)
 
