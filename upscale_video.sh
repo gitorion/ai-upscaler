@@ -55,7 +55,6 @@ declare -A MODEL_FILES=(
 # Requires: pip install basicsr  +  spynet_20210409-c6c1bd09.pth in models/
 declare -A TEMPORAL_MODEL_FILES=(
     [basicvsr]="BasicVSR_PlusPlus_REDS4.pth"
-    [realbasicvsr]="RealBasicVSR_x4.pth"
 )
 
 ##############################################################################
@@ -88,7 +87,6 @@ Model selection (-m / --model):
 
   ── Temporal models (basicsr) — multi-frame, best temporal consistency ─────
   basicvsr    BasicVSR++ — strong on real-world degraded video  (requires basicsr)
-  realbasicvsr  RealBasicVSR — tuned for blind degradation  (requires basicsr)
 
   Temporal models process a sliding window of frames simultaneously using optical
   flow, producing sharper results with far less frame-to-frame flickering.
@@ -133,7 +131,7 @@ Examples:
   $0 -i film.mkv -r 1080p
 
   # Temporal — best for flickery/heavily compressed sources
-  $0 -i film.mkv -r 1080p -m realbasicvsr
+  $0 -i film.mkv -r 1080p -m basicvsr
 
   # Temporal with smaller window (reduces VRAM)
   $0 -i film.mkv -r 1080p -m basicvsr --temporal-window 7
@@ -158,10 +156,9 @@ Model downloads (place .pth files in $MODEL_DIR):
   realesrgan   github.com/xinntao/Real-ESRGAN             → RealESRGAN_x4plus.pth
   hat          github.com/XPixelGroup/HAT/releases        → HAT-L_SRx4_ImageNet-pretrain.pth
                (requires: pip install spandrel-extra-arches)
-  basicvsr     github.com/ckkelvinchan/BasicVSR_PlusPlus  → BasicVSR_PlusPlus_REDS4.pth
-               (download as basicvsr_plusplus_c64n7_...pth, rename to BasicVSR_PlusPlus_REDS4.pth)
-               (requires: pip install basicsr)
-  realbasicvsr github.com/ckkelvinchan/RealBasicVSR       → RealBasicVSR_x4.pth
+  basicvsr     openmmlab CDN                              → BasicVSR_PlusPlus_REDS4.pth
+               wget -O ~/ai-upscale/models/BasicVSR_PlusPlus_REDS4.pth \
+               https://download.openmmlab.com/mmediting/restorers/basicvsr_plusplus/basicvsr_plusplus_c64n7_8x1_600k_reds4_20210217-db622b2f.pth
                (requires: pip install basicsr)
   spynet       Required by both temporal models           → spynet_20210409-c6c1bd09.pth
                (downloaded automatically by basicsr on first use)
@@ -721,18 +718,16 @@ import numpy as np
 from tqdm import tqdm
 
 # ── Temporal model configs ─────────────────────────────────────────────────────
-# arch_module / arch_class must match the basicsr package layout.
-# params are passed to the constructor; spynet_path is added at load time.
+# arch_module / arch_class confirmed against basicsr 1.4.2 source.
+# ckpt_prefix: layer name prefix added by the training framework's wrapper class
+#   that must be stripped before load_state_dict. basicsr checkpoints use no
+#   prefix; mmediting-trained checkpoints wrap the generator as 'generator.*'.
 TEMPORAL_MODEL_CONFIGS = {
     'basicvsr': {
-        'arch_module': 'basicsr.archs.basicvsr_pp_arch',
+        'arch_module': 'basicsr.archs.basicvsrpp_arch',   # note: no underscore between vsr/pp
         'arch_class':  'BasicVSRPlusPlus',
         'params': {'mid_channels': 64, 'num_blocks': 7, 'is_low_res_input': True},
-    },
-    'realbasicvsr': {
-        'arch_module': 'basicsr.archs.real_basicvsr_arch',
-        'arch_class':  'RealBasicVSR',
-        'params': {'num_feat': 64, 'num_block': 9, 'is_low_res_input': True},
+        'ckpt_prefix': 'generator.',   # mmediting wraps BasicVSRPlusPlus in a BasicVSR model
     },
 }
 
@@ -745,17 +740,28 @@ def load_temporal_model(model_key, model_path, spynet_path, device, use_half):
     arch_cls = getattr(module, cfg['arch_class'])
 
     params = dict(cfg['params'])
-    # Pass SPyNet path — empty string means basicsr will attempt auto-download
     params['spynet_path'] = spynet_path if spynet_path else None
 
     model = arch_cls(**params)
 
-    state = torch.load(model_path, map_location='cpu')
-    # Different checkpoints store weights under different top-level keys
+    ckpt = torch.load(model_path, map_location='cpu')
+
+    # Extract weights from the top-level checkpoint key (basicsr uses 'params'/'params_ema';
+    # mmediting-trained checkpoints use 'state_dict')
+    state = ckpt
     for key in ('params_ema', 'params', 'state_dict'):
-        if key in state:
-            state = state[key]
+        if key in ckpt:
+            state = ckpt[key]
             break
+
+    # Strip any wrapper prefix added by the training framework.
+    # mmediting wraps BasicVSRPlusPlus inside a BasicVSR model as self.generator,
+    # so all keys are prefixed 'generator.' in the checkpoint.
+    prefix = cfg.get('ckpt_prefix', '')
+    if prefix:
+        state = {k[len(prefix):]: v
+                 for k, v in state.items()
+                 if k.startswith(prefix)}
 
     model.load_state_dict(state, strict=True)
     model = model.eval().to(device)

@@ -47,12 +47,20 @@ Process a sliding window of frames simultaneously using optical flow. Produce be
 
 | Key | Filename | Best for | Download |
 |-----|----------|----------|----------|
-| `basicvsr` | `BasicVSR_PlusPlus_REDS4.pth` | Real-world degraded video, strong all-rounder | github.com/ckkelvinchan/BasicVSR_PlusPlus (rename after download) |
-| `realbasicvsr` | `RealBasicVSR_x4.pth` | Blind degradation — noisy/compressed sources | github.com/ckkelvinchan/RealBasicVSR |
+| `basicvsr` | `BasicVSR_PlusPlus_REDS4.pth` | Real-world degraded video, strong all-rounder | openmmlab CDN (see wget command below) |
 
 Temporal models require:
 1. `pip install basicsr` in the venv (handled by `install.sh`)
-2. SPyNet optical flow weights: `spynet_20210409-c6c1bd09.pth` in `~/ai-upscale/models/` — basicsr will attempt to download this automatically on first run
+2. SPyNet optical flow weights in `~/ai-upscale/models/`:
+   ```bash
+   wget -O ~/ai-upscale/models/spynet_20210409-c6c1bd09.pth \
+     https://download.openmmlab.com/mmediting/restorers/basicvsr/spynet_20210409-c6c1bd09.pth
+   ```
+3. BasicVSR++ weights in `~/ai-upscale/models/`:
+   ```bash
+   wget -O ~/ai-upscale/models/BasicVSR_PlusPlus_REDS4.pth \
+     https://download.openmmlab.com/mmediting/restorers/basicvsr_plusplus/basicvsr_plusplus_c64n7_8x1_600k_reds4_20210217-db622b2f.pth
+   ```
 
 All models are 4x. The script uses the model's native 4x output and resizes to your target resolution at the FFmpeg encode step.
 
@@ -77,7 +85,7 @@ Required:
 
 Model:
   -m, --model TYPE          nomos8k (default), nomos8kdat, lsdir, ultrasharp,
-                            realesrgan, hat, basicvsr, realbasicvsr
+                            realesrgan, hat, basicvsr
 
 Pre-processing:
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -141,7 +149,6 @@ All models are 4x. Selection guide:
 **Temporal (basicsr) — process a sliding window of frames:**
 
 - **basicvsr** — BasicVSR++. Uses optical flow (SPyNet) to align and fuse information across multiple frames. Produces sharper, more temporally consistent results than any single-frame model, especially on compressed sources where blocks and noise are consistent across nearby frames.
-- **realbasicvsr** — RealBasicVSR. Built on the same BasicVSR++ backbone but specifically trained for blind real-world degradation. Strong choice for broadcast rips, streaming captures, and heavily compressed sources.
 
 Temporal models require `pip install basicsr` and the `spynet_20210409-c6c1bd09.pth` weights file — basicsr auto-downloads SPyNet on first use. See `--temporal-window` to control how many frames are processed in each pass.
 
@@ -186,7 +193,7 @@ Controls the HEVC output encode quality (CRF). Output is always HEVC 10-bit in a
 ./upscale_video.sh -i recording.mkv -r 1080p
 
 # Temporal — best for flickery/heavily compressed sources (requires basicsr)
-./upscale_video.sh -i recording.mkv -r 1080p -m realbasicvsr
+./upscale_video.sh -i recording.mkv -r 1080p -m basicvsr
 
 # Temporal with smaller window to save VRAM
 ./upscale_video.sh -i recording.mkv -r 1080p -m basicvsr --temporal-window 7
@@ -256,8 +263,7 @@ cd ~/ai-upscale
 │   ├── 4x-UltraSharp.pth
 │   ├── RealESRGAN_x4plus.pth
 │   ├── HAT-L_SRx4_ImageNet-pretrain.pth
-│   ├── BasicVSR_PlusPlus_REDS4.pth  ← basicvsr (temporal, rename after download)
-│   ├── RealBasicVSR_x4.pth          ← realbasicvsr (temporal)
+│   ├── BasicVSR_PlusPlus_REDS4.pth  ← basicvsr (temporal)
 │   └── spynet_20210409-c6c1bd09.pth ← required by temporal models
 └── temp/                   # Temporary processing files (auto-created and deleted)
 ```
@@ -294,7 +300,11 @@ pip install basicsr
 ```
 
 ### SPyNet weights missing (temporal models)
-basicsr will attempt to auto-download `spynet_20210409-c6c1bd09.pth` on first use. If that fails, download it manually from the basicsr/Real-ESRGAN release assets and place it in `~/ai-upscale/models/`.
+Download manually and place in `~/ai-upscale/models/`:
+```bash
+wget -O ~/ai-upscale/models/spynet_20210409-c6c1bd09.pth \
+  https://download.openmmlab.com/mmediting/restorers/basicvsr/spynet_20210409-c6c1bd09.pth
+```
 
 ### Out of VRAM
 ```bash
@@ -331,7 +341,6 @@ sudo nvidia-smi -pl 165     # Set power limit (adjust to your GPU's TDP)
 - Real-ESRGAN: github.com/xinntao/Real-ESRGAN
 - HAT: github.com/XPixelGroup/HAT
 - BasicVSR++: github.com/ckkelvinchan/BasicVSR_PlusPlus
-- RealBasicVSR: github.com/ckkelvinchan/RealBasicVSR
 - basicsr: github.com/XPixelGroup/BasicSR
 - 4xNomos8kSC / 4xLSDIR: github.com/Phhofm/models
 - 4x-UltraSharp: huggingface.co/Kim2091

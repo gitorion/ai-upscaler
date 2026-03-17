@@ -190,7 +190,7 @@ setup_ai_upscale() {
     pip install tqdm
     pip install numpy
 
-    print_info "Installing basicsr (required for temporal models: basicvsr, realbasicvsr)..."
+    print_info "Installing basicsr (required for temporal models: basicvsr)..."
     # basicsr may emit harmless deprecation warnings during install — these are safe to ignore
     pip install basicsr 2>&1 | grep -v "UserWarning\|FutureWarning\|DeprecationWarning" || true
 
@@ -284,19 +284,31 @@ download_models() {
     # Re-enable exit on error
     set -e
 
+    # SPyNet optical flow weights — required by temporal models (BasicVSR++)
+    download_model \
+        "spynet_20210409-c6c1bd09.pth" \
+        "https://download.openmmlab.com/mmediting/restorers/basicvsr/spynet_20210409-c6c1bd09.pth" \
+        "SPyNet optical flow weights (required for basicvsr temporal model)"
+
+    # BasicVSR++ — temporal model
+    download_model \
+        "BasicVSR_PlusPlus_REDS4.pth" \
+        "https://download.openmmlab.com/mmediting/restorers/basicvsr_plusplus/basicvsr_plusplus_c64n7_8x1_600k_reds4_20210217-db622b2f.pth" \
+        "BasicVSR++ (temporal model)"
+
     echo ""
-    print_warning "The recommended default model (4xNomos8kDAT.pth) must be downloaded manually:"
+    print_warning "The default model (4xNomos8kSC.pth) must be downloaded manually:"
     print_info "  1. Go to: https://openmodeldb.info"
-    print_info "  2. Search for '4xNomos8kDAT'"
-    print_info "  3. Download 4xNomos8kDAT.pth → place in $MODEL_DIR"
+    print_info "  2. Search for '4xNomos8kSC'"
+    print_info "  3. Download 4xNomos8kSC.pth → place in $MODEL_DIR"
     echo ""
-    print_warning "Other optional models (also from openmodeldb.info):"
-    print_info "  - 4xNomos8kSC.pth   (model key: nomos8k  — previous default, RRDB-based)"
+    print_warning "Other optional single-frame models (also from openmodeldb.info):"
+    print_info "  - 4xNomos8kDAT.pth  (model key: nomos8kdat — slower, higher quality)"
     print_info "  - 4xLSDIR.pth       (model key: lsdir)"
     print_info "  - HAT-L_SRx4_ImageNet-pretrain.pth  (model key: hat)"
     echo ""
 
-    if [ ! -f "RealESRGAN_x4plus.pth" ] && [ ! -f "4xNomos8kDAT.pth" ] && [ ! -f "4xNomos8kSC.pth" ]; then
+    if [ ! -f "RealESRGAN_x4plus.pth" ] && [ ! -f "4xNomos8kSC.pth" ]; then
         print_error "No models found in $MODEL_DIR"
         print_error "Download at least one model before upscaling"
     else
@@ -425,8 +437,21 @@ else
     echo "✗ FAILED (venv not found)"
 fi
 
-# Test 7: AI models
-echo -n "7. AI models: "
+# Test 7: basicsr (temporal models)
+echo -n "7. basicsr (temporal): "
+if [ -f ~/ai-upscale/venv/bin/python3 ]; then
+    if ~/ai-upscale/venv/bin/python3 -c "import basicsr; from basicsr.archs.basicvsrpp_arch import BasicVSRPlusPlus" 2>/dev/null; then
+        BASICSR_VER=$(~/ai-upscale/venv/bin/python3 -c "import basicsr; print(basicsr.__version__)" 2>/dev/null)
+        echo "✓ OK (basicsr $BASICSR_VER)"
+    else
+        echo "✗ FAILED — run: source ~/ai-upscale/venv/bin/activate && pip install basicsr"
+    fi
+else
+    echo "✗ FAILED (venv not found)"
+fi
+
+# Test 8: AI models
+echo -n "8. AI models: "
 MODEL_COUNT=$(ls ~/ai-upscale/models/*.pth 2>/dev/null | wc -l)
 if [ "$MODEL_COUNT" -gt 0 ]; then
     echo "✓ OK ($MODEL_COUNT model(s) found)"
@@ -439,8 +464,8 @@ else
     echo "   Download 4xNomos8kSC.pth from openmodeldb.info and place it there"
 fi
 
-# Test 8: Upscale script
-echo -n "8. Upscale script: "
+# Test 9: Upscale script
+echo -n "9. Upscale script: "
 THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -x "$THIS_DIR/upscale_video.sh" ]; then
     echo "✓ OK"
@@ -473,7 +498,7 @@ show_completion() {
     echo "  ./upscale_video.sh -i input.mkv -r 1080p"
     echo -e "  ./upscale_video.sh --help\n"
     echo -e "${YELLOW}Documentation:${NC}"
-    echo -e "  See QUICKSTART.md and README.md\n"
+    echo -e "  See README.md\n"
 }
 
 ##############################################################################
