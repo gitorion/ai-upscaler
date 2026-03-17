@@ -711,11 +711,27 @@ write_temporal_python_script() {
     cat > "$TEMP_DIR/upscale_temporal.py" << 'TEMPORAL_EOF'
 import sys
 import os
+import re
 import importlib
 import cv2
 import torch
 import numpy as np
 from tqdm import tqdm
+
+# ── Patch basicsr flow_warp for half-precision compatibility ───────────────────
+# basicsr's flow_warp() explicitly casts its coordinate grid to float32 (.float()),
+# which causes F.grid_sample to fail when feature maps are float16.
+# We patch it to upcast both tensors to float32 for the warp, then convert back.
+import basicsr.archs.arch_util as _bsr_arch_util
+_orig_flow_warp = _bsr_arch_util.flow_warp
+def _flow_warp_half_safe(x, flow, interp_mode='bilinear', padding_mode='zeros', align_corners=True):
+    orig_dtype = x.dtype
+    if orig_dtype != torch.float32:
+        x = x.float()
+        flow = flow.float()
+    out = _orig_flow_warp(x, flow, interp_mode=interp_mode, padding_mode=padding_mode, align_corners=align_corners)
+    return out.to(orig_dtype)
+_bsr_arch_util.flow_warp = _flow_warp_half_safe
 
 # ── Temporal model configs ─────────────────────────────────────────────────────
 # arch_module / arch_class confirmed against basicsr 1.4.2 source.
@@ -734,8 +750,6 @@ TEMPORAL_MODEL_CONFIGS = {
 
 MODEL_SCALE = 4   # all supported temporal models output 4×
 
-
-import re
 
 def _remap_basicvsrpp_mmediting(state):
     """
