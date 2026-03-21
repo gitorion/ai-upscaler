@@ -722,6 +722,20 @@ from tqdm import tqdm
 # propagation; expandable segments lets PyTorch reuse fragmented reserved blocks.
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
+# ── Neuter basicsr's __init__ to avoid broken wildcard imports ──────────────────
+# basicsr 1.4.2's __init__.py does `from .data import *`, `from .losses import *`,
+# etc.  Several of these trigger imports of torchvision internals that were removed
+# in newer torchvision (e.g. torchvision.transforms.functional_tensor).
+# We only need basicsr.archs, so we replace the package __init__ entirely.
+import importlib, types as _types, sys
+_basicsr_spec = importlib.util.find_spec('basicsr')
+if _basicsr_spec is not None:
+    _basicsr_mod = _types.ModuleType('basicsr')
+    _basicsr_mod.__path__ = _basicsr_spec.submodule_search_locations or [_basicsr_spec.origin.rsplit('/', 1)[0]]
+    _basicsr_mod.__package__ = 'basicsr'
+    _basicsr_mod.__version__ = '1.4.2'
+    sys.modules['basicsr'] = _basicsr_mod
+
 # ── Patch basicsr flow_warp for half-precision compatibility ───────────────────
 # basicsr's flow_warp() explicitly casts its coordinate grid to float32 (.float()),
 # which causes F.grid_sample to fail when feature maps are float16.

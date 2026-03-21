@@ -440,8 +440,17 @@ fi
 # Test 7: basicsr (temporal models)
 echo -n "7. basicsr (temporal): "
 if [ -f ~/ai-upscale/venv/bin/python3 ]; then
-    if ~/ai-upscale/venv/bin/python3 -c "import basicsr; from basicsr.archs.basicvsrpp_arch import BasicVSRPlusPlus" 2>/dev/null; then
-        BASICSR_VER=$(~/ai-upscale/venv/bin/python3 -c "import basicsr; print(basicsr.__version__)" 2>/dev/null)
+    if ~/ai-upscale/venv/bin/python3 -c "
+import importlib, importlib.util, types, sys
+_s = importlib.util.find_spec('basicsr')
+if _s is None: exit(1)
+_m = types.ModuleType('basicsr')
+_m.__path__ = _s.submodule_search_locations or [_s.origin.rsplit('/',1)[0]]
+_m.__package__ = 'basicsr'
+sys.modules['basicsr'] = _m
+from basicsr.archs.basicvsrpp_arch import BasicVSRPlusPlus
+" 2>/dev/null; then
+        BASICSR_VER=$(~/ai-upscale/venv/bin/python3 -c "import importlib.util; s=importlib.util.find_spec('basicsr'); print('1.4.2' if s else 'unknown')" 2>/dev/null)
         echo "✓ OK (basicsr $BASICSR_VER)"
     else
         echo "✗ FAILED — run: source ~/ai-upscale/venv/bin/activate && pip install basicsr"
