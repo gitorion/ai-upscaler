@@ -1001,7 +1001,7 @@ upscale_video() {
 
     if [[ "$IS_TEMPORAL" == true ]]; then
         # Temporal pipeline — basicsr multi-frame models
-        if ! "$VENV_DIR/bin/python3" -c "from basicsr.archs.basicvsrpp_arch import BasicVSRPlusPlus" &>/dev/null; then
+        if ! "$VENV_DIR/bin/python3" -c "import importlib.util; exit(0 if importlib.util.find_spec('basicsr') else 1)" &>/dev/null; then
             print_error "basicsr not installed — required for temporal models (basicvsr, realbasicvsr)"
             print_error "Fix: source $VENV_DIR/bin/activate && pip install basicsr"
             exit 1
