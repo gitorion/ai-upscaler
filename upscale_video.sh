@@ -208,19 +208,19 @@ get_video_info() {
     local f="$1"
     print_info "Analysing input..."
 
-    INPUT_WIDTH=$(ffprobe  -v error -select_streams v:0 -show_entries stream=width            -of csv=p=0 "$f")
-    INPUT_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height           -of csv=p=0 "$f")
-    INPUT_FPS=$(ffprobe    -v error -select_streams v:0 -show_entries stream=r_frame_rate     -of csv=p=0 "$f" | bc -l | xargs printf "%.3f")
-    DURATION=$(ffprobe     -v error                     -show_entries format=duration         -of csv=p=0 "$f" | xargs printf "%.2f")
-    TOTAL_FRAMES=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$f")
-    INPUT_CODEC=$(ffprobe  -v error -select_streams v:0 -show_entries stream=codec_name       -of csv=p=0 "$f")
+    INPUT_WIDTH=$(ffprobe  -v error -select_streams v:0 -show_entries stream=width            -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
+    INPUT_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height           -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
+    INPUT_FPS=$(ffprobe    -v error -select_streams v:0 -show_entries stream=r_frame_rate     -of default=noprint_wrappers=1:nokey=1 "$f" | head -1 | bc -l | xargs printf "%.3f")
+    DURATION=$(ffprobe     -v error                     -show_entries format=duration         -of default=noprint_wrappers=1:nokey=1 "$f" | head -1 | xargs printf "%.2f")
+    TOTAL_FRAMES=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
+    INPUT_CODEC=$(ffprobe  -v error -select_streams v:0 -show_entries stream=codec_name       -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
 
     # SAR / DAR — needed for correct output width on anamorphic (non-square pixel) sources
-    INPUT_SAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio  -of csv=p=0 "$f" 2>/dev/null || echo "")
-    INPUT_DAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=display_aspect_ratio -of csv=p=0 "$f" 2>/dev/null || echo "")
+    INPUT_SAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio  -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || echo "")
+    INPUT_DAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=display_aspect_ratio -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || echo "")
 
     local audio_stream
-    audio_stream=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of csv=p=0 "$f" 2>/dev/null || true)
+    audio_stream=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || true)
     HAS_AUDIO=$([[ -n "$audio_stream" ]] && echo true || echo false)
 
     print_info "Input: ${INPUT_WIDTH}x${INPUT_HEIGHT}  SAR:${INPUT_SAR:-1:1}  DAR:${INPUT_DAR:-N/A}  ${INPUT_FPS}fps  ${DURATION}s  ${TOTAL_FRAMES} frames  codec:${INPUT_CODEC}  audio:${HAS_AUDIO}"
