@@ -556,13 +556,21 @@ def upscale_video(input_video, frames_dir, model_path,
     os.makedirs(frames_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(input_video)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames <= 0:
-        total_frames = None  # unknown — tqdm will show count only
+
+    # Use ffprobe for reliable fps/frame-count (OpenCV is unreliable on MKV/FFV1)
+    import subprocess, json as _json
+    _probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
+         '-show_entries', 'stream=r_frame_rate,nb_read_frames',
+         '-of', 'json', input_video],
+        capture_output=True, text=True)
+    _info = _json.loads(_probe.stdout)['streams'][0]
+    _num, _den = map(int, _info['r_frame_rate'].split('/'))
+    fps = _num / _den
+    total_frames = int(_info.get('nb_read_frames', 0)) or None
 
     with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
-        fh.write(str(fps))
+        fh.write(f"{fps:.6f}")
 
     # ── Async 3-stage pipeline ─────────────────────────────────────────────────
     #   Stage 1 (reader thread):  decode frames from video  → read_q
@@ -885,11 +893,21 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
     os.makedirs(frames_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(input_video)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Use ffprobe for reliable fps/frame-count (OpenCV is unreliable on MKV/FFV1)
+    import subprocess, json as _json
+    _probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
+         '-show_entries', 'stream=r_frame_rate,nb_read_frames',
+         '-of', 'json', input_video],
+        capture_output=True, text=True)
+    _info = _json.loads(_probe.stdout)['streams'][0]
+    _num, _den = map(int, _info['r_frame_rate'].split('/'))
+    fps = _num / _den
+    total_frames = int(_info.get('nb_read_frames', 0)) or 0
 
     with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
-        fh.write(str(fps))
+        fh.write(f"{fps:.6f}")
 
     # Resume: if all expected frames already exist, skip entirely
     if resume:
