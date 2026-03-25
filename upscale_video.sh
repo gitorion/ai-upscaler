@@ -219,11 +219,20 @@ get_video_info() {
     INPUT_SAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio  -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || echo "")
     INPUT_DAR=$(ffprobe -v error -select_streams v:0 -show_entries stream=display_aspect_ratio -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || echo "")
 
+    # Field order — detect interlaced vs progressive
+    INPUT_FIELD_ORDER=$(ffprobe -v error -select_streams v:0 -show_entries stream=field_order -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || echo "")
+    case "$INPUT_FIELD_ORDER" in
+        tt|bb|tb|bt) IS_INTERLACED=true  ;;
+        *)           IS_INTERLACED=false ;;
+    esac
+
     local audio_stream
     audio_stream=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || true)
     HAS_AUDIO=$([[ -n "$audio_stream" ]] && echo true || echo false)
 
-    print_info "Input: ${INPUT_WIDTH}x${INPUT_HEIGHT}  SAR:${INPUT_SAR:-1:1}  DAR:${INPUT_DAR:-N/A}  ${INPUT_FPS}fps  ${DURATION}s  ${TOTAL_FRAMES} frames  codec:${INPUT_CODEC}  audio:${HAS_AUDIO}"
+    local scan_label="progressive"
+    [[ "$IS_INTERLACED" == true ]] && scan_label="interlaced"
+    print_info "Input: ${INPUT_WIDTH}x${INPUT_HEIGHT}  SAR:${INPUT_SAR:-1:1}  DAR:${INPUT_DAR:-N/A}  ${INPUT_FPS}fps  ${DURATION}s  ${TOTAL_FRAMES} frames  codec:${INPUT_CODEC}  scan:${scan_label}  audio:${HAS_AUDIO}"
 }
 
 calculate_scale() {
@@ -324,8 +333,15 @@ run_prefilter() {
     local vf_parts=()
 
     if [[ "$DEINTERLACE" == true ]]; then
-        # mode=1: output a frame for each field (doubles framerate for interlaced content)
-        vf_parts+=("yadif=mode=1:parity=-1:deint=1")
+        if [[ "$IS_INTERLACED" == true ]]; then
+            # mode=1: output a frame for each field (doubles framerate to preserve temporal detail)
+            vf_parts+=("yadif=mode=1:parity=-1:deint=1")
+            print_info "Deinterlace: mode=1 (interlaced source — doubling framerate)"
+        else
+            # mode=0: frame-rate preserving — safe no-op for progressive content
+            vf_parts+=("yadif=mode=0:parity=-1:deint=1")
+            print_info "Deinterlace: mode=0 (progressive source — framerate preserved)"
+        fi
     fi
 
     case "$PREFILTER" in
