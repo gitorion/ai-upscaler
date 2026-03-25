@@ -908,19 +908,19 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
 
     os.makedirs(frames_dir, exist_ok=True)
 
-    cap = cv2.VideoCapture(input_video)
-
-    # Use ffprobe for reliable fps/frame-count (OpenCV is unreliable on MKV/FFV1)
+    # Use ffprobe for reliable fps, frame-count, and dimensions
     import subprocess, json as _json
     _probe = subprocess.run(
         ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
-         '-show_entries', 'stream=r_frame_rate,nb_read_frames',
+         '-show_entries', 'stream=r_frame_rate,nb_read_frames,width,height',
          '-of', 'json', input_video],
         capture_output=True, text=True)
     _info = _json.loads(_probe.stdout)['streams'][0]
     _num, _den = map(int, _info['r_frame_rate'].split('/'))
     fps = _num / _den
     total_frames = int(_info.get('nb_read_frames', 0)) or 0
+    src_w = int(_info['width'])
+    src_h = int(_info['height'])
 
     with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
         fh.write(f"{fps:.6f}")
@@ -931,7 +931,6 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
                     if f.startswith('frame_') and f.endswith('.png')]
         if len(existing) >= max(total_frames, 1):
             print(f"Resume: {len(existing)} frames already present — skipping upscale")
-            cap.release()
             return True
 
     # ── Streaming sliding-window inference ────────────────────────────────────
@@ -950,19 +949,30 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
     print(f"Temporal window: {window_size}  |  Overlap: {OVERLAP}  |  Stride: {stride}")
     print(f"Output: {output_w}×{output_h}")
 
+    # ── FFmpeg pipe reader (reliable for all containers, unlike OpenCV) ────────
+    ffmpeg_cmd = [
+        'ffmpeg', '-v', 'error', '-i', input_video,
+        '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'
+    ]
+    ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE,
+                                   bufsize=src_w * src_h * 3 * 4)
+    frame_nbytes = src_w * src_h * 3
+
     def read_n(n):
         frames = []
         for _ in range(n):
-            ret, frame = cap.read()
-            if not ret:
+            raw = ffmpeg_proc.stdout.read(frame_nbytes)
+            if len(raw) < frame_nbytes:
                 break
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape(src_h, src_w, 3)
             frames.append(frame)
         return frames
 
     # Prime: read first full window
     window = read_n(window_size)
     if not window:
-        cap.release()
+        ffmpeg_proc.stdout.close()
+        ffmpeg_proc.wait()
         return False
 
     eof = len(window) < window_size
@@ -1015,7 +1025,13 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
                 eof = True
             window = context + new_frames
 
-    cap.release()
+    ffmpeg_proc.stdout.close()
+    ffmpeg_proc.wait()
+
+    if total_frames > 0 and output_idx < total_frames:
+        print(f"WARNING: produced {output_idx}/{total_frames} frames "
+              f"({total_frames - output_idx} missing)")
+
     return output_idx > 0
 
 
