@@ -70,11 +70,14 @@ usage() {
     cat << EOF
 ${GREEN}AI Video Upscaler${NC} — spandrel + basicsr edition, live-action optimised
 
-Usage: $0 -i INPUT -r RESOLUTION [OPTIONS]
+Usage: $0 -i INPUT [-r RESOLUTION] [OPTIONS]
+
+  Run with just -i for interactive mode, or pass all options via CLI.
 
 Required:
   -i, --input FILE          Input video file
   -r, --resolution RES      Target resolution: 720p, 1080p, 1440p, 2160p
+                             (omit for interactive mode)
 
 Model selection (-m / --model):
   ── Single-frame models (spandrel) ──────────────────────────────────────────
@@ -1234,12 +1237,132 @@ while [[ $# -gt 0 ]]; do
 done
 
 ##############################################################################
+# Interactive mode — triggered when only -i is provided (no -r)
+##############################################################################
+
+interactive_setup() {
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║              AI Video Upscaler — Interactive Setup          ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # ── Resolution ────────────────────────────────────────────────────────────
+    echo -e "${BLUE}Target resolution:${NC}"
+    echo "  1) 720p   — SD → HD"
+    echo "  2) 1080p  — SD/HD → Full HD"
+    echo "  3) 1440p  — HD → 2K"
+    echo "  4) 2160p  — HD/FHD → 4K"
+    echo ""
+    while true; do
+        read -rp "Choose [1-4]: " res_choice
+        case "$res_choice" in
+            1) RESOLUTION="720p";  break ;;
+            2) RESOLUTION="1080p"; break ;;
+            3) RESOLUTION="1440p"; break ;;
+            4) RESOLUTION="2160p"; break ;;
+            *) echo "  Invalid choice, try again." ;;
+        esac
+    done
+    echo ""
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    echo -e "${BLUE}AI model:${NC}"
+    echo ""
+    echo -e "  ${GREEN}Single-frame models${NC} (process each frame independently)"
+    echo "  1) nomos8k      — Best all-rounder for compressed video [default]"
+    echo "  2) ultrasharp   — Maximum sharpness on clean sources (Blu-ray, high-quality)"
+    echo "  3) lsdir        — Sharp detail on real-world degraded content"
+    echo "  4) hat          — Highest fidelity transformer model, clean sources only (slow)"
+    echo "  5) nomos8kdat   — DAT transformer, very slow, short clips only"
+    echo "  6) realesrgan   — Legacy fallback"
+    echo ""
+    echo -e "  ${GREEN}Temporal models${NC} (process multiple frames — better consistency, much faster)"
+    echo "  7) basicvsr     — Best for long content (TV/movies), degraded or compressed sources"
+    echo ""
+    while true; do
+        read -rp "Choose [1-7, default=1]: " model_choice
+        case "${model_choice:-1}" in
+            1) MODEL_KEY="nomos8k";     break ;;
+            2) MODEL_KEY="ultrasharp";  break ;;
+            3) MODEL_KEY="lsdir";       break ;;
+            4) MODEL_KEY="hat";         break ;;
+            5) MODEL_KEY="nomos8kdat";  break ;;
+            6) MODEL_KEY="realesrgan";  break ;;
+            7) MODEL_KEY="basicvsr";    break ;;
+            *) echo "  Invalid choice, try again." ;;
+        esac
+    done
+    echo ""
+
+    # ── Prefilter ─────────────────────────────────────────────────────────────
+    echo -e "${BLUE}Pre-filter (noise/artifact reduction before AI upscaling):${NC}"
+    echo "  1) none    — Clean sources: Blu-ray, high-quality 1080p"
+    echo "  2) light   — Good default: mild denoise, safe for most content [default]"
+    echo "  3) medium  — Compressed/blocky sources: web downloads, streaming rips"
+    echo "  4) heavy   — Badly degraded: VHS, old TV recordings, heavy compression"
+    echo ""
+    while true; do
+        read -rp "Choose [1-4, default=2]: " pf_choice
+        case "${pf_choice:-2}" in
+            1) PREFILTER="none";   break ;;
+            2) PREFILTER="light";  break ;;
+            3) PREFILTER="medium"; break ;;
+            4) PREFILTER="heavy";  break ;;
+            *) echo "  Invalid choice, try again." ;;
+        esac
+    done
+    echo ""
+
+    # ── Deinterlace ───────────────────────────────────────────────────────────
+    echo -e "${BLUE}Deinterlace?${NC}"
+    echo "  Recommended for interlaced sources (DVD, old TV broadcasts, camcorder footage)."
+    echo "  Safe to enable on progressive sources — it will auto-detect and preserve framerate."
+    echo ""
+    while true; do
+        read -rp "Enable deinterlace? [y/N]: " di_choice
+        case "${di_choice:-n}" in
+            [yY]|[yY][eE][sS]) DEINTERLACE=true;  break ;;
+            [nN]|[nN][oO]|"")  DEINTERLACE=false; break ;;
+            *) echo "  Invalid choice, try again." ;;
+        esac
+    done
+    echo ""
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
+    echo -e "  Input:       $INPUT_FILE"
+    echo -e "  Resolution:  $RESOLUTION"
+    echo -e "  Model:       $MODEL_KEY"
+    echo -e "  Prefilter:   $PREFILTER"
+    echo -e "  Deinterlace: $DEINTERLACE"
+    echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
+    echo ""
+    while true; do
+        read -rp "Proceed? [Y/n]: " confirm
+        case "${confirm:-y}" in
+            [yY]|[yY][eE][sS]|"") break ;;
+            [nN]|[nN][oO])
+                echo "Aborted."
+                exit 0
+                ;;
+            *) echo "  Invalid choice, try again." ;;
+        esac
+    done
+    echo ""
+}
+
+##############################################################################
 # Main
 ##############################################################################
 
-if [[ -z "$INPUT_FILE" || -z "$RESOLUTION" ]]; then
-    print_error "Missing required arguments (-i and -r)"
+if [[ -z "$INPUT_FILE" ]]; then
+    print_error "Missing input file (-i)"
     usage
+fi
+
+if [[ -z "$RESOLUTION" ]]; then
+    interactive_setup
 fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
