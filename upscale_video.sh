@@ -737,14 +737,15 @@ import sys
 import os
 import re
 import importlib
+# Reduce CUDA memory fragmentation. BasicVSR++ makes many large allocations during
+# propagation; expandable segments lets PyTorch reuse fragmented reserved blocks.
+# MUST be set before torch is imported.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 import cv2
 import torch
 import numpy as np
 from tqdm import tqdm
-
-# Reduce CUDA memory fragmentation. BasicVSR++ makes many large allocations during
-# propagation; expandable segments lets PyTorch reuse fragmented reserved blocks.
-os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
 # ── Neuter basicsr's __init__ to avoid broken wildcard imports ──────────────────
 # basicsr 1.4.2's __init__.py does `from .data import *`, `from .losses import *`,
@@ -1014,6 +1015,10 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
                 cv2.imwrite(frame_path, out_frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
                 output_idx += 1
                 pbar.update(1)
+
+            # Free GPU memory from this iteration before building the next window
+            del tensors, out_batch
+            torch.cuda.empty_cache()
 
             if eof:
                 break
