@@ -944,7 +944,7 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
     # Only `window_size` raw frames are in RAM at any moment.
     # ─────────────────────────────────────────────────────────────────────────
     OVERLAP = min(2, window_size // 4)
-    stride  = max(1, window_size - 2 * OVERLAP)
+    stride  = max(1, window_size - OVERLAP)
 
     print(f"Temporal window: {window_size}  |  Overlap: {OVERLAP}  |  Stride: {stride}")
     print(f"Output: {output_w}×{output_h}")
@@ -995,8 +995,10 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
                 out_batch = model(tensors)  # [1, T, C, 4H, 4W]
 
             # Which frames from this window are "valid" output?
+            # Left trim only — skip OVERLAP frames already output by the previous window.
+            # No right trim: BasicVSR++ is bidirectional so edge quality is fine.
             valid_start = 0 if is_first else OVERLAP
-            valid_end   = len(window) if eof else len(window) - OVERLAP
+            valid_end   = len(window)
 
             for j in range(valid_start, valid_end):
                 out_frame = tensor_to_frame(out_batch[0, j])
@@ -1018,9 +1020,8 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
 
             is_first = False
 
-            # Slide: keep 2*OVERLAP trailing frames so the next window is full-size
-            # and the trimmed middle region [OVERLAP:-OVERLAP] is contiguous.
-            context    = window[-(2 * OVERLAP):] if OVERLAP > 0 else []
+            # Slide: keep OVERLAP trailing frames as leading context for next window
+            context    = window[-OVERLAP:] if OVERLAP > 0 else []
             new_frames = read_n(stride)
             if len(new_frames) < stride:
                 eof = True
