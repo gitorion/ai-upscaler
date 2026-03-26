@@ -1018,8 +1018,9 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
 
             is_first = False
 
-            # Slide: keep trailing OVERLAP frames as leading context for next window
-            context    = window[-OVERLAP:]
+            # Slide: keep 2*OVERLAP trailing frames so the next window is full-size
+            # and the trimmed middle region [OVERLAP:-OVERLAP] is contiguous.
+            context    = window[-(2 * OVERLAP):] if OVERLAP > 0 else []
             new_frames = read_n(stride)
             if len(new_frames) < stride:
                 eof = True
