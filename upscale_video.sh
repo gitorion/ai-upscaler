@@ -215,7 +215,14 @@ get_video_info() {
     INPUT_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height           -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
     INPUT_FPS=$(ffprobe    -v error -select_streams v:0 -show_entries stream=r_frame_rate     -of default=noprint_wrappers=1:nokey=1 "$f" | head -1 | bc -l | xargs printf "%.3f")
     DURATION=$(ffprobe     -v error                     -show_entries format=duration         -of default=noprint_wrappers=1:nokey=1 "$f" | head -1 | xargs printf "%.2f")
-    TOTAL_FRAMES=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
+    # Cascading frame count: nb_frames (container metadata, instant) → count_packets (fast) → count_frames (slow, full decode)
+    TOTAL_FRAMES=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
+    if [[ -z "$TOTAL_FRAMES" || "$TOTAL_FRAMES" == "N/A" || "$TOTAL_FRAMES" -le 0 ]] 2>/dev/null; then
+        TOTAL_FRAMES=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
+    fi
+    if [[ -z "$TOTAL_FRAMES" || "$TOTAL_FRAMES" == "N/A" || "$TOTAL_FRAMES" -le 0 ]] 2>/dev/null; then
+        TOTAL_FRAMES=$(ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
+    fi
     INPUT_CODEC=$(ffprobe  -v error -select_streams v:0 -show_entries stream=codec_name       -of default=noprint_wrappers=1:nokey=1 "$f" | head -1)
 
     # SAR / DAR — needed for correct output width on anamorphic (non-square pixel) sources
@@ -578,15 +585,34 @@ def upscale_video(input_video, frames_dir, model_path,
 
     # Use ffprobe for reliable fps/frame-count (OpenCV is unreliable on MKV/FFV1)
     import subprocess, json as _json
+
+    # Get fps and dimensions from metadata (instant)
     _probe = subprocess.run(
-        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
-         '-show_entries', 'stream=r_frame_rate,nb_read_frames',
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+         '-show_entries', 'stream=r_frame_rate,nb_frames',
          '-of', 'json', input_video],
         capture_output=True, text=True)
     _info = _json.loads(_probe.stdout)['streams'][0]
     _num, _den = map(int, _info['r_frame_rate'].split('/'))
     fps = _num / _den
-    total_frames = int(_info.get('nb_read_frames', 0)) or None
+
+    # Cascading frame count: nb_frames (container, instant) → count_packets (fast) → count_frames (slow)
+    total_frames = int(_info.get('nb_frames', 0) or 0)
+    if total_frames <= 0:
+        _probe2 = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_packets',
+             '-show_entries', 'stream=nb_read_packets', '-of', 'json', input_video],
+            capture_output=True, text=True)
+        _info2 = _json.loads(_probe2.stdout)['streams'][0]
+        total_frames = int(_info2.get('nb_read_packets', 0) or 0)
+    if total_frames <= 0:
+        _probe3 = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
+             '-show_entries', 'stream=nb_read_frames', '-of', 'json', input_video],
+            capture_output=True, text=True)
+        _info3 = _json.loads(_probe3.stdout)['streams'][0]
+        total_frames = int(_info3.get('nb_read_frames', 0) or 0)
+    total_frames = total_frames or None
 
     with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
         fh.write(f"{fps:.6f}")
@@ -914,17 +940,37 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
 
     # Use ffprobe for reliable fps, frame-count, and dimensions
     import subprocess, json as _json
+
+    # Get fps, dimensions, and container frame count (instant)
     _probe = subprocess.run(
-        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
-         '-show_entries', 'stream=r_frame_rate,nb_read_frames,width,height',
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+         '-show_entries', 'stream=r_frame_rate,nb_frames,width,height',
          '-of', 'json', input_video],
         capture_output=True, text=True)
     _info = _json.loads(_probe.stdout)['streams'][0]
     _num, _den = map(int, _info['r_frame_rate'].split('/'))
     fps = _num / _den
-    total_frames = int(_info.get('nb_read_frames', 0)) or 0
     src_w = int(_info['width'])
     src_h = int(_info['height'])
+
+    # Cascading frame count: nb_frames (container, instant) → count_packets (fast) → count_frames (slow)
+    total_frames = int(_info.get('nb_frames', 0) or 0)
+    if total_frames <= 0:
+        print("Counting frames (packet scan)...", flush=True)
+        _probe2 = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_packets',
+             '-show_entries', 'stream=nb_read_packets', '-of', 'json', input_video],
+            capture_output=True, text=True)
+        _info2 = _json.loads(_probe2.stdout)['streams'][0]
+        total_frames = int(_info2.get('nb_read_packets', 0) or 0)
+    if total_frames <= 0:
+        print("Counting frames (full decode — this may take a while)...", flush=True)
+        _probe3 = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
+             '-show_entries', 'stream=nb_read_frames', '-of', 'json', input_video],
+            capture_output=True, text=True)
+        _info3 = _json.loads(_probe3.stdout)['streams'][0]
+        total_frames = int(_info3.get('nb_read_frames', 0) or 0)
 
     with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
         fh.write(f"{fps:.6f}")
