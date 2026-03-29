@@ -49,7 +49,7 @@ Process a sliding window of frames simultaneously using optical flow. Better tem
 
 | Key | Filename | Best for | Speed (4060 Ti 16GB) | Download |
 |-----|----------|----------|----------------------|----------|
-| `basicvsr` | `BasicVSR_PlusPlus_REDS4.pth` | Long content, degraded/compressed video | ~0.27 s/frame @ 480p, ~2 s/frame @ 720p | openmmlab CDN |
+| `basicvsr` | `BasicVSR_PlusPlus_REDS4.pth` | Long content, degraded/compressed video | ~0.16 s/frame @ 480p, ~2 s/frame @ 720p | openmmlab CDN |
 
 Temporal models require:
 1. `pip install basicsr` in the venv (handled by `install.sh`)
@@ -70,7 +70,7 @@ All models are 4x. The script uses the model's native 4x output and resizes to y
 
 | Model | 480p source | 720p source |
 |-------|------------|------------|
-| basicvsr | ~7 hrs | ~51 hrs |
+| basicvsr | ~4 hrs | ~51 hrs |
 | nomos8k / ultrasharp / lsdir | ~100 hrs | ~250 hrs |
 | hat | ~200 hrs | ~500 hrs |
 | nomos8kdat | ~600 hrs | ~1600 hrs |
