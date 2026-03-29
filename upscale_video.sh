@@ -929,29 +929,28 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
     with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
         fh.write(f"{fps:.6f}")
 
-    # Resume: if all expected frames already exist, skip entirely
-    if resume:
-        existing = [f for f in os.listdir(frames_dir)
-                    if f.startswith('frame_') and f.endswith('.png')]
-        if len(existing) >= max(total_frames, 1):
-            print(f"Resume: {len(existing)} frames already present — skipping upscale")
-            return True
-
-    # ── Streaming sliding-window inference ────────────────────────────────────
-    # The model processes a window of `window_size` frames at once.
-    # We keep OVERLAP frames of past context and read-ahead for future context
-    # so boundaries between windows have full neighbour information.
-    #
-    #  window = [past_overlap | new_frames | future_overlap]
-    #  valid output = output[past_overlap : past_overlap + new_frames]
-    #
-    # Only `window_size` raw frames are in RAM at any moment.
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Sliding-window parameters ────────────────────────────────────────────
     OVERLAP = min(2, window_size // 4)
     stride  = max(1, window_size - OVERLAP)
 
-    print(f"Temporal window: {window_size}  |  Overlap: {OVERLAP}  |  Stride: {stride}")
-    print(f"Output: {output_w}×{output_h}")
+    # Resume: find last completed frame and calculate where to restart
+    resume_from = 0
+    if resume:
+        existing = sorted([f for f in os.listdir(frames_dir)
+                           if f.startswith('frame_') and f.endswith('.png')])
+        if existing:
+            last_idx = int(existing[-1].replace('frame_', '').replace('.png', ''))
+            resume_from = last_idx + 1
+            if resume_from >= max(total_frames, 1):
+                print(f"Resume: all {len(existing)} frames already present — skipping upscale")
+                return True
+            # Snap to a window boundary so we produce contiguous output.
+            # First window outputs window_size frames, subsequent output stride each.
+            if resume_from <= window_size:
+                resume_from = 0  # still in first window, restart from beginning
+            else:
+                resume_from = window_size + ((resume_from - window_size) // stride) * stride
+            print(f"Resume: restarting from output frame {resume_from}")
 
     # ── FFmpeg pipe reader (reliable for all containers, unlike OpenCV) ────────
     ffmpeg_cmd = [
@@ -961,6 +960,24 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
     ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE,
                                    bufsize=src_w * src_h * 3 * 4)
     frame_nbytes = src_w * src_h * 3
+
+    # If resuming, skip source frames to reach the restart point.
+    # Source frames consumed = resume_from (first window_size, then stride each).
+    # We need OVERLAP extra context frames before the window, so back up slightly.
+    if resume_from > 0:
+        if resume_from <= window_size:
+            skip_source = 0
+        else:
+            skip_source = resume_from - OVERLAP
+        if skip_source > 0:
+            print(f"Resume: skipping {skip_source} source frames...", flush=True)
+            for _ in range(skip_source):
+                raw = ffmpeg_proc.stdout.read(frame_nbytes)
+                if len(raw) < frame_nbytes:
+                    break
+
+    print(f"Temporal window: {window_size}  |  Overlap: {OVERLAP}  |  Stride: {stride}")
+    print(f"Output: {output_w}×{output_h}")
 
     def read_n(n):
         frames = []
@@ -984,10 +1001,11 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
     while len(window) < window_size:
         window.insert(0, window[0])
 
-    output_idx = 0
-    is_first   = True
+    output_idx = resume_from
+    is_first   = (resume_from == 0)
 
     with tqdm(total=total_frames if total_frames > 0 else None,
+              initial=resume_from,
               desc="Upscaling frames (temporal)", unit="frame") as pbar:
         while True:
             # Build [1, T, C, H, W] batch
