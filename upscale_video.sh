@@ -708,6 +708,7 @@ def upscale_video(input_video, frames_dir, model_path,
     writer_t.start()
 
     frame_count = 0
+    consecutive_fails = 0
 
     with tqdm(total=total_frames, desc="Upscaling frames", unit="frame") as pbar:
         while True:
@@ -754,12 +755,19 @@ def upscale_video(input_video, frames_dir, model_path,
                 write_q.put((frame_path, out_frame))
 
             except Exception as e:
+                consecutive_fails += 1
                 print(f"\n[WARN] Frame {frame_num} failed ({e}) — writing resized original", flush=True)
+                if consecutive_fails >= 10:
+                    print(f"\n[ERROR] {consecutive_fails} consecutive frames failed — aborting.", flush=True)
+                    print(f"[ERROR] Try a smaller tile size: -t 512 or -t 256", flush=True)
+                    sys.exit(1)
                 try:
                     fallback = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_LANCZOS4)
                     write_q.put((frame_path, fallback))
                 except Exception:
                     pass
+            else:
+                consecutive_fails = 0
 
             frame_count += 1
             pbar.update(1)
@@ -1562,10 +1570,22 @@ if [[ "$USE_AI" == true ]]; then
     # slower at tile=0 due to attention mechanisms. Use -t 0 explicitly only when you
     # know you are running an RRDB model and have enough VRAM.
     if [[ "$IS_TEMPORAL" == false && "$TILE_SIZE_EXPLICIT" == false ]]; then
-        if (( INPUT_HEIGHT <= 720 )); then
-            TILE_SIZE=0        # full-frame — fastest for RRDB models on ≤720p with 16GB VRAM
-        elif (( INPUT_HEIGHT <= 1080 )); then
-            TILE_SIZE=1024     # 2×2 tiles for 1080p
+        # Transformer models (hat, nomos8kdat) cannot use full-frame — always tile
+        local is_transformer=false
+        case "$MODEL_KEY" in hat|nomos8kdat) is_transformer=true ;; esac
+
+        if [[ "$is_transformer" == true ]]; then
+            if (( INPUT_HEIGHT <= 720 )); then
+                TILE_SIZE=512
+            elif (( INPUT_HEIGHT <= 1080 )); then
+                TILE_SIZE=512
+            fi
+        else
+            if (( INPUT_HEIGHT <= 720 )); then
+                TILE_SIZE=0        # full-frame — fastest for RRDB models on ≤720p with 16GB VRAM
+            elif (( INPUT_HEIGHT <= 1080 )); then
+                TILE_SIZE=1024     # 2×2 tiles for 1080p
+            fi
         fi
         # 1440p / 2160p keep the 512 default
     fi
