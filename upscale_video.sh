@@ -1564,6 +1564,16 @@ calculate_scale "$RESOLUTION"
 if [[ "$USE_AI" == true ]]; then
     select_model
 
+    # Transformer models overflow float16 — auto-enable full precision
+    case "$MODEL_KEY" in
+    hat|nomos8kdat)
+        if [[ "$FULL_PRECISION" == false ]]; then
+            FULL_PRECISION=true
+            print_info "Auto-enabling --full-precision for $MODEL_KEY (transformer models overflow float16)"
+        fi
+        ;;
+    esac
+
     # Auto-select tile size for single-frame models (not used by temporal pipeline).
     # Full-frame (tile=0) is only beneficial for RRDB-based models (nomos8k, realesrgan,
     # lsdir, ultrasharp) — transformer models (nomos8kdat, hat, span) run dramatically
