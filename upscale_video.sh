@@ -1316,8 +1316,8 @@ simple_scale() {
 cleanup() {
     if [[ "$KEEP_TEMP" == false ]]; then
         print_info "Cleaning up temp files..."
-        find "$TEMP_DIR" -type f -delete 2>/dev/null
-        rm -rf "$TEMP_DIR" 2>/dev/null
+        find "$TEMP_DIR" -type f -delete 2>/dev/null || true
+        rm -rf "$TEMP_DIR" 2>/dev/null || true
         print_success "Cleanup done"
     else
         print_info "Temp files kept in: $TEMP_DIR"
@@ -1403,16 +1403,31 @@ interactive_setup() {
     echo ""
     while true; do
         read -rp "Choose [1-7, default=1]: " model_choice
+        local selected_key=""
         case "${model_choice:-1}" in
-            1) MODEL_KEY="nomos8k";     break ;;
-            2) MODEL_KEY="ultrasharp";  break ;;
-            3) MODEL_KEY="lsdir";       break ;;
-            4) MODEL_KEY="hat";         break ;;
-            5) MODEL_KEY="nomos8kdat";  break ;;
-            6) MODEL_KEY="realesrgan";  break ;;
-            7) MODEL_KEY="basicvsr";    break ;;
-            *) echo "  Invalid choice, try again." ;;
+            1) selected_key="nomos8k"    ;;
+            2) selected_key="ultrasharp" ;;
+            3) selected_key="lsdir"      ;;
+            4) selected_key="hat"        ;;
+            5) selected_key="nomos8kdat" ;;
+            6) selected_key="realesrgan" ;;
+            7) selected_key="basicvsr"   ;;
+            *) echo "  Invalid choice, try again."; continue ;;
         esac
+        # Validate model file exists
+        local model_file=""
+        if [[ -n "${MODEL_FILES[$selected_key]+_}" ]]; then
+            model_file="$MODEL_DIR/${MODEL_FILES[$selected_key]}"
+        elif [[ -n "${TEMPORAL_MODEL_FILES[$selected_key]+_}" ]]; then
+            model_file="$MODEL_DIR/${TEMPORAL_MODEL_FILES[$selected_key]}"
+        fi
+        if [[ ! -f "$model_file" ]]; then
+            echo -e "  ${RED}Model not found:${NC} $model_file"
+            echo "  Download it to $MODEL_DIR and try again, or choose a different model."
+            continue
+        fi
+        MODEL_KEY="$selected_key"
+        break
     done
     echo ""
 
@@ -1518,7 +1533,7 @@ mkdir -p "$TEMP_DIR"
 
 if [[ "$RESUME" == false ]]; then
     # Fresh run — clear previous temp data
-    find "$TEMP_DIR/frames" -type f -delete 2>/dev/null
+    find "$TEMP_DIR/frames" -type f -delete 2>/dev/null || true
     rm -rf "$TEMP_DIR/frames"
     rm -f  "$TEMP_DIR/cleaned_source.mkv"
     rm -f  "$TEMP_DIR/upscale.py"
