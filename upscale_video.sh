@@ -1571,22 +1571,20 @@ if [[ "$USE_AI" == true ]]; then
     # know you are running an RRDB model and have enough VRAM.
     if [[ "$IS_TEMPORAL" == false && "$TILE_SIZE_EXPLICIT" == false ]]; then
         # Transformer models (hat, nomos8kdat) cannot use full-frame — always tile
-        local is_transformer=false
-        case "$MODEL_KEY" in hat|nomos8kdat) is_transformer=true ;; esac
-
-        if [[ "$is_transformer" == true ]]; then
-            if (( INPUT_HEIGHT <= 720 )); then
-                TILE_SIZE=512
-            elif (( INPUT_HEIGHT <= 1080 )); then
+        case "$MODEL_KEY" in
+        hat|nomos8kdat)
+            if (( INPUT_HEIGHT <= 1080 )); then
                 TILE_SIZE=512
             fi
-        else
+            ;;
+        *)
             if (( INPUT_HEIGHT <= 720 )); then
                 TILE_SIZE=0        # full-frame — fastest for RRDB models on ≤720p with 16GB VRAM
             elif (( INPUT_HEIGHT <= 1080 )); then
                 TILE_SIZE=1024     # 2×2 tiles for 1080p
             fi
-        fi
+            ;;
+        esac
         # 1440p / 2160p keep the 512 default
     fi
 
