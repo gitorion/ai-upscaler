@@ -1325,7 +1325,6 @@ encode_output() {
 
     local fps
     fps=$(cat "$frames_dir/fps.txt")
-    print_info "Encoding: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT} @ ${fps}fps  preset:${ENCODE_SPEED} crf:${QUALITY} → $output_file"
 
     local crf
     case "$QUALITY" in
@@ -1334,6 +1333,8 @@ encode_output() {
         low)    crf=24 ;;
         *)      print_error "Unknown quality: $QUALITY"; exit 1 ;;
     esac
+
+    print_info "Encoding: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT} @ ${fps}fps  preset:${ENCODE_SPEED} crf:${crf} → $output_file"
 
     local x265_preset="$ENCODE_SPEED"
     case "$ENCODE_SPEED" in
