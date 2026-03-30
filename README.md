@@ -154,7 +154,7 @@ Performance / quality (single-frame models):
   --full-precision          Use float32 instead of float16 (auto for hat/nomos8kdat)
 
 Temporal model options:
-  --temporal-window N       Sliding window size in frames (default: 15)
+  --temporal-window N       Sliding window size in frames (default: auto — probes GPU)
 
 Workflow:
   --resume                  Skip already-completed frames from an interrupted run
@@ -203,7 +203,7 @@ All models are 4x. Selection guide:
 
 ### --temporal-window
 
-Controls the sliding window size for temporal models (default: 15). A larger window gives the model more temporal context — better continuity for long smooth pans or slow-moving scenes — but uses more VRAM. Reduce to `7` or `5` if you hit out-of-memory errors.
+Controls the sliding window size for temporal models. Defaults to **auto** — after loading the model, the script probes GPU VRAM by running a test window with descending sizes (15 → 13 → 11 → 9 → 7 → 5 → 3) and selects the largest that fits. A larger window gives better temporal continuity for slow pans and smooth motion. Pass `--temporal-window N` to override.
 
 ### --tile / --tile-pad
 

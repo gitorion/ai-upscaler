@@ -38,7 +38,7 @@ FULL_PRECISION=false
 KEEP_TEMP=false
 UPSCALE_SOURCE=""
 IS_TEMPORAL=false
-TEMPORAL_WINDOW=15
+TEMPORAL_WINDOW="auto"
 SPYNET_PATH=""
 
 # ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
@@ -128,8 +128,9 @@ Performance / quality (single-frame models only):
   --full-precision          Use float32 instead of float16 (marginal quality gain, uses more VRAM)
 
 Temporal model options:
-  --temporal-window N       Sliding window size in frames (default: 15)
-                            Larger = more temporal context, more VRAM. Reduce if OOM.
+  --temporal-window N       Sliding window size in frames [default: auto]
+                            Auto mode probes GPU VRAM and selects the largest window
+                            that fits (max 15). Override with an explicit value.
 
 Workflow:
   --resume                  Resume interrupted run — skip already-completed frames
@@ -1017,6 +1018,42 @@ def tensor_to_frame(t):
     )
 
 
+def probe_window_size(model, window_size, src_h, src_w, device, use_half):
+    """Try descending window sizes on dummy frames to find the largest that fits in VRAM."""
+    candidates = [s for s in [window_size, 13, 11, 9, 7, 5, 3] if s <= window_size]
+    # Deduplicate while preserving order
+    seen = set()
+    candidates = [s for s in candidates if not (s in seen or seen.add(s))]
+
+    dtype = torch.float16 if use_half else torch.float32
+    print(f"Probing optimal window size for {src_w}x{src_h} input...", flush=True)
+
+    with torch.no_grad():
+        for size in candidates:
+            torch.cuda.empty_cache()
+            try:
+                dummy = torch.rand(1, size, 3, src_h, src_w, dtype=dtype, device=device)
+                out = model(dummy)
+                del out, dummy
+                torch.cuda.empty_cache()
+                print(f"Auto window: {size} frames — OK", flush=True)
+                return size
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    try:
+                        del dummy
+                    except NameError:
+                        pass
+                    torch.cuda.empty_cache()
+                    print(f"Auto window: {size} frames — OOM, trying smaller", flush=True)
+                    continue
+                raise
+
+    torch.cuda.empty_cache()
+    print(f"Auto window: all sizes OOM — using {candidates[-1]} as minimum", flush=True)
+    return candidates[-1]
+
+
 def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path,
                      window_size, output_w, output_h, use_full_precision, resume):
 
@@ -1065,6 +1102,11 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
 
     with open(os.path.join(frames_dir, 'fps.txt'), 'w') as fh:
         fh.write(f"{fps:.6f}")
+
+    # Auto-probe optimal window size if requested
+    if window_size < 0:
+        window_size = probe_window_size(model, 15, src_h, src_w, device, use_half)
+    print(f"Window size: {window_size}", flush=True)
 
     # ── Sliding-window parameters ────────────────────────────────────────────
     OVERLAP = min(2, window_size // 4)
@@ -1211,7 +1253,7 @@ if __name__ == '__main__':
         model_key          = model_key,
         model_path         = model_path,
         spynet_path        = spynet_path,
-        window_size        = int(window_size),
+        window_size        = -1 if window_size == 'auto' else int(window_size),
         output_w           = int(output_w),
         output_h           = int(output_h),
         use_full_precision = (use_full_precision_str == 'true'),
@@ -1237,7 +1279,9 @@ upscale_video() {
         fi
         write_temporal_python_script
         print_info "Starting temporal AI upscaling..."
-        print_info "Model: $MODEL_KEY  |  Window: ${TEMPORAL_WINDOW} frames  |  Prefilter: ${PREFILTER}"
+        local win_note="$TEMPORAL_WINDOW"
+        [[ "$TEMPORAL_WINDOW" == "auto" ]] && win_note="auto (probing GPU)"
+        print_info "Model: $MODEL_KEY  |  Window: ${win_note}  |  Prefilter: ${PREFILTER}"
 
         "$VENV_DIR/bin/python3" "$TEMP_DIR/upscale_temporal.py" \
             "$UPSCALE_SOURCE" \
