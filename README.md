@@ -37,6 +37,7 @@ Process one frame at a time. No additional dependencies beyond the base install.
 | `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **default** | ~4 s/frame @ 480p | openmodeldb.info |
 | `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on clean sources | ~4 s/frame @ 480p | huggingface.co/Kim2091/UltraSharp |
 | `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4 s/frame @ 480p | openmodeldb.info |
+| `atdjpg` | `4xNomos8k_atd_jpg.pth` | Best for heavily compressed/degraded sources | ~6 s/frame @ 480p | github.com/Phhofm/models |
 | `hat` | `HAT-L_SRx4_ImageNet-pretrain.pth` | Highest fidelity transformer, clean sources only | ~8 s/frame @ 480p | github.com/XPixelGroup/HAT/releases |
 | `nomos8kdat` | `4xNomos8kDAT.pth` | DAT transformer — very slow, short clips only | ~24 s/frame @ 480p | openmodeldb.info |
 | `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | ~4 s/frame @ 480p | github.com/xinntao/Real-ESRGAN/releases |
@@ -191,6 +192,7 @@ All models are 4x. Selection guide:
 **Single-frame (spandrel) — process one frame at a time:**
 
 - **nomos8k** — RRDB-based, trained on real-world degradations. Fast and reliable. Best all-rounder for compressed video. **Default.**
+- **atdjpg** — ATD (Adaptive Token Dictionary) transformer trained on Nomos8k with aggressive JPEG compression (down to quality 40), re-compression, blur, and resizes. Best single-frame model for heavily compressed/degraded sources — DVD rips, old web downloads, heavily transcoded files. Preserves film grain rather than smoothing it. Auto full-precision, auto tile probing.
 - **ultrasharp** — Maximum perceived sharpness on clean sources. Can over-sharpen noisy inputs.
 - **lsdir** — Sharp edges and fine detail on real-world degraded content.
 - **hat** — Hybrid Attention Transformer. Highest fidelity single-frame model, designed for clean sources. Pair with `--prefilter none`. Slow (~2x nomos8k).
@@ -217,7 +219,7 @@ The upscaler writes each frame as a PNG to a temp folder as it goes. If a run is
 
 ### --full-precision
 
-Uses float32 instead of float16 for model inference. Auto-enabled for transformer models (`hat`, `nomos8kdat`) which overflow float16. For RRDB models the quality difference is marginal. Uses roughly 2x the VRAM — the auto tile probe accounts for this.
+Uses float32 instead of float16 for model inference. Auto-enabled for transformer models (`hat`, `nomos8kdat`, `atdjpg`) which overflow float16. For RRDB models the quality difference is marginal. Uses roughly 2x the VRAM — the auto tile probe accounts for this.
 
 ### --sharpen
 
