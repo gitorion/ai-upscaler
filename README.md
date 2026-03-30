@@ -109,6 +109,9 @@ Pass all options directly for scripted or automated use:
 # Temporal with smaller window to save VRAM
 ./upscale_video.sh -i recording.mkv -r 1080p -m basicvsr --temporal-window 7
 
+# Faster encode — trade some compression efficiency for ~4x faster encode
+./upscale_video.sh -i recording.mkv -r 1080p -m basicvsr --encode-speed fast
+
 # Resume an interrupted run
 ./upscale_video.sh -i recording.mkv -r 1080p --resume
 
@@ -142,6 +145,7 @@ Pre-processing:
 Output:
   -o, --output FILE         Output filename (default: INPUT_upscaled_RES.mkv)
   -q, --quality LEVEL       high (default, crf 16), medium (crf 20), low (crf 24)
+  --encode-speed SPEED      slow (default, best quality), medium (~2x faster), fast (~4x faster)
   --sharpen                 Apply unsharp mask to final output
 
 Performance / quality (single-frame models):
@@ -236,6 +240,18 @@ Controls the HEVC output encode quality (CRF). Output is always HEVC 10-bit in a
 | `high` | 16 | **Default** — visually lossless |
 | `medium` | 20 | Good balance of quality and file size |
 | `low` | 24 | Smaller files, some visible compression |
+
+### --encode-speed
+
+Controls the x265 encoder preset. This affects the final encode step only — it has no impact on AI upscaling speed.
+
+| Speed | x265 preset | Encode time (relative) | Notes |
+|-------|-------------|----------------------|-------|
+| `slow` | slow | 1x (baseline) | **Default** — best compression efficiency and quality |
+| `medium` | medium | ~2x faster | Good balance for long content |
+| `fast` | fast | ~4x faster | Noticeably faster, slightly larger files at same CRF |
+
+For a 97-minute 1080p 60fps encode, `slow` takes ~9 hours on an 8-thread CPU. Switch to `medium` or `fast` when encode time matters more than squeezing out maximum quality per byte.
 
 ## Pipeline
 

@@ -29,6 +29,7 @@ TILE_SIZE_EXPLICIT=false
 TILE_PAD=64
 MODEL_KEY="nomos8k"
 QUALITY="high"
+ENCODE_SPEED="slow"
 PREFILTER="light"
 DEINTERLACE=false
 RESUME=false
@@ -107,6 +108,10 @@ Pre-processing (applied before AI upscaling to clean degraded sources):
 Output:
   -o, --output FILE         Output file (default: INPUT_upscaled_RES.mkv)
   -q, --quality QUALITY     high (crf 16), medium (crf 20), low (crf 24) [default: high]
+  --encode-speed SPEED      Encode speed/quality tradeoff [default: slow]
+                              slow       Best quality, slowest encode (default)
+                              medium     Balanced — ~2x faster than slow
+                              fast       Quick encode — ~4x faster, slightly lower quality
   --sharpen                 Apply mild unsharp mask to final output
 
 Performance / quality (single-frame models only):
@@ -1190,7 +1195,7 @@ encode_output() {
 
     local fps
     fps=$(cat "$frames_dir/fps.txt")
-    print_info "Encoding: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT} @ ${fps}fps → $output_file"
+    print_info "Encoding: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT} @ ${fps}fps  preset:${ENCODE_SPEED} crf:${QUALITY} → $output_file"
 
     local crf
     case "$QUALITY" in
@@ -1198,6 +1203,12 @@ encode_output() {
         medium) crf=20 ;;
         low)    crf=24 ;;
         *)      print_error "Unknown quality: $QUALITY"; exit 1 ;;
+    esac
+
+    local x265_preset="$ENCODE_SPEED"
+    case "$ENCODE_SPEED" in
+        slow|medium|fast) ;;
+        *)  print_error "Unknown encode speed: $ENCODE_SPEED"; exit 1 ;;
     esac
 
     # Final resize to exact target dimensions (safety net for rounding differences)
@@ -1213,7 +1224,7 @@ encode_output() {
             -pattern_type glob -i "$frames_dir/frame_*.png" \
             -i "$TEMP_DIR/audio.mka" \
             -vf "$vf_out" \
-            -c:v libx265 -crf "$crf" -preset slow \
+            -c:v libx265 -crf "$crf" -preset "$x265_preset" \
             -pix_fmt yuv420p10le \
             -x265-params "no-open-gop=1:keyint=250:bframes=8:aq-mode=3" \
             -c:a copy \
@@ -1224,7 +1235,7 @@ encode_output() {
             -framerate "$fps" \
             -pattern_type glob -i "$frames_dir/frame_*.png" \
             -vf "$vf_out" \
-            -c:v libx265 -crf "$crf" -preset slow \
+            -c:v libx265 -crf "$crf" -preset "$x265_preset" \
             -pix_fmt yuv420p10le \
             -x265-params "no-open-gop=1:keyint=250:bframes=8:aq-mode=3" \
             -movflags +faststart \
@@ -1249,7 +1260,7 @@ simple_scale() {
 
     ffmpeg -i "$input_file" \
         -vf "scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=lanczos" \
-        -c:v libx265 -crf "$crf" -preset slow \
+        -c:v libx265 -crf "$crf" -preset "$ENCODE_SPEED" \
         -pix_fmt yuv420p10le \
         -c:a copy \
         -movflags +faststart \
@@ -1286,6 +1297,7 @@ while [[ $# -gt 0 ]]; do
         --tile-pad)          TILE_PAD="$2";        shift 2 ;;
         --temporal-window)   TEMPORAL_WINDOW="$2"; shift 2 ;;
         -q|--quality)        QUALITY="$2";         shift 2 ;;
+        --encode-speed)      ENCODE_SPEED="$2";    shift 2 ;;
         --prefilter)         PREFILTER="$2";       shift 2 ;;
         --deinterlace)       DEINTERLACE=true;     shift   ;;
         --resume)            RESUME=true;          shift   ;;
@@ -1393,13 +1405,31 @@ interactive_setup() {
     done
     echo ""
 
+    # ── Encode speed ──────────────────────────────────────────────────────────
+    echo -e "${BLUE}Encode speed${NC} (x265 preset — affects final encode time, not AI upscaling):"
+    echo "  1) slow     Best quality, slowest encode (default)"
+    echo "  2) medium   Balanced — ~2x faster than slow"
+    echo "  3) fast     Quick encode — ~4x faster, slightly lower quality"
+    echo ""
+    while true; do
+        read -rp "Choose [1-3, default=1]: " es_choice
+        case "${es_choice:-1}" in
+            1) ENCODE_SPEED="slow";   break ;;
+            2) ENCODE_SPEED="medium"; break ;;
+            3) ENCODE_SPEED="fast";   break ;;
+            *) echo "  Invalid choice, try again." ;;
+        esac
+    done
+    echo ""
+
     # ── Summary ───────────────────────────────────────────────────────────────
     echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "  Input:       $INPUT_FILE"
-    echo -e "  Resolution:  $RESOLUTION"
-    echo -e "  Model:       $MODEL_KEY"
-    echo -e "  Prefilter:   $PREFILTER"
-    echo -e "  Deinterlace: $DEINTERLACE"
+    echo -e "  Input:        $INPUT_FILE"
+    echo -e "  Resolution:   $RESOLUTION"
+    echo -e "  Model:        $MODEL_KEY"
+    echo -e "  Prefilter:    $PREFILTER"
+    echo -e "  Deinterlace:  $DEINTERLACE"
+    echo -e "  Encode speed: $ENCODE_SPEED"
     echo -e "${GREEN}────────────────────────────────────────────────────────────────${NC}"
     echo ""
     while true; do
