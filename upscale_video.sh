@@ -1583,9 +1583,7 @@ if [[ "$USE_AI" == true ]]; then
         # Transformer models (hat, nomos8kdat) cannot use full-frame — always tile
         case "$MODEL_KEY" in
         hat|nomos8kdat)
-            if (( INPUT_HEIGHT <= 1080 )); then
-                TILE_SIZE=512
-            fi
+            TILE_SIZE=256    # float32 + large model weights — needs small tiles on 16GB
             ;;
         *)
             if (( INPUT_HEIGHT <= 720 )); then
