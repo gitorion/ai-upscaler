@@ -1272,7 +1272,8 @@ simple_scale() {
 cleanup() {
     if [[ "$KEEP_TEMP" == false ]]; then
         print_info "Cleaning up temp files..."
-        rm -rf "$TEMP_DIR"
+        find "$TEMP_DIR" -type f -delete 2>/dev/null
+        rm -rf "$TEMP_DIR" 2>/dev/null
         print_success "Cleanup done"
     else
         print_info "Temp files kept in: $TEMP_DIR"
@@ -1473,6 +1474,7 @@ mkdir -p "$TEMP_DIR"
 
 if [[ "$RESUME" == false ]]; then
     # Fresh run — clear previous temp data
+    find "$TEMP_DIR/frames" -type f -delete 2>/dev/null
     rm -rf "$TEMP_DIR/frames"
     rm -f  "$TEMP_DIR/cleaned_source.mkv"
     rm -f  "$TEMP_DIR/upscale.py"
