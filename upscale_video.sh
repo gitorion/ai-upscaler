@@ -245,9 +245,13 @@ get_video_info() {
     audio_stream=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || true)
     HAS_AUDIO=$([[ -n "$audio_stream" ]] && echo true || echo false)
 
+    local sub_stream
+    sub_stream=$(ffprobe -v error -select_streams s:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | head -1 || true)
+    HAS_SUBS=$([[ -n "$sub_stream" ]] && echo true || echo false)
+
     local scan_label="progressive"
     [[ "$IS_INTERLACED" == true ]] && scan_label="interlaced"
-    print_info "Input: ${INPUT_WIDTH}x${INPUT_HEIGHT}  SAR:${INPUT_SAR:-1:1}  DAR:${INPUT_DAR:-N/A}  ${INPUT_FPS}fps  ${DURATION}s  ${TOTAL_FRAMES} frames  codec:${INPUT_CODEC}  scan:${scan_label}  audio:${HAS_AUDIO}"
+    print_info "Input: ${INPUT_WIDTH}x${INPUT_HEIGHT}  SAR:${INPUT_SAR:-1:1}  DAR:${INPUT_DAR:-N/A}  ${INPUT_FPS}fps  ${DURATION}s  ${TOTAL_FRAMES} frames  codec:${INPUT_CODEC}  scan:${scan_label}  audio:${HAS_AUDIO}  subs:${HAS_SUBS}"
 }
 
 calculate_scale() {
@@ -411,14 +415,40 @@ extract_audio() {
     fi
 
     print_info "Extracting audio..."
-    # Extract from original input (cleaned_source.mkv has -an / no audio)
-    ffmpeg -i "$input_file" -vn -acodec copy "$audio_file" -y -loglevel error || true
+    # Extract all audio streams from original input (cleaned_source.mkv has -an / no audio)
+    ffmpeg -i "$input_file" -vn -sn -map 0:a -c:a copy "$audio_file" -y -loglevel error || true
 
     if [[ -f "$audio_file" && -s "$audio_file" ]]; then
         print_success "Audio extracted"
     else
         HAS_AUDIO=false
         print_warning "Audio extraction failed — encoding without audio"
+    fi
+}
+
+extract_subs() {
+    local input_file="$1"
+    local subs_file="$TEMP_DIR/subs.mkv"
+
+    if [[ "$HAS_SUBS" == false ]]; then
+        return
+    fi
+
+    # On resume, reuse existing subtitle extraction
+    if [[ "$RESUME" == true && -f "$subs_file" && -s "$subs_file" ]]; then
+        print_info "Resume: reusing existing subtitles"
+        return
+    fi
+
+    print_info "Extracting subtitles..."
+    # Extract all subtitle streams from original input
+    ffmpeg -i "$input_file" -vn -an -map 0:s -c:s copy "$subs_file" -y -loglevel error || true
+
+    if [[ -f "$subs_file" && -s "$subs_file" ]]; then
+        print_success "Subtitles extracted"
+    else
+        HAS_SUBS=false
+        print_warning "Subtitle extraction failed — encoding without subtitles"
     fi
 }
 
@@ -1218,29 +1248,37 @@ encode_output() {
         vf_out="${vf_out},unsharp=3:3:0.5:3:3:0.0"
     fi
 
+    # Build ffmpeg inputs and mapping for audio/subtitles
+    local -a extra_inputs=()
+    local -a extra_maps=()
+    local -a extra_codecs=()
+
     if [[ "$HAS_AUDIO" == true && -f "$TEMP_DIR/audio.mka" ]]; then
-        ffmpeg \
-            -framerate "$fps" \
-            -pattern_type glob -i "$frames_dir/frame_*.png" \
-            -i "$TEMP_DIR/audio.mka" \
-            -vf "$vf_out" \
-            -c:v libx265 -crf "$crf" -preset "$x265_preset" \
-            -pix_fmt yuv420p10le \
-            -x265-params "no-open-gop=1:keyint=250:bframes=8:aq-mode=3" \
-            -c:a copy \
-            -movflags +faststart \
-            "$output_file" -y -loglevel error -stats
-    else
-        ffmpeg \
-            -framerate "$fps" \
-            -pattern_type glob -i "$frames_dir/frame_*.png" \
-            -vf "$vf_out" \
-            -c:v libx265 -crf "$crf" -preset "$x265_preset" \
-            -pix_fmt yuv420p10le \
-            -x265-params "no-open-gop=1:keyint=250:bframes=8:aq-mode=3" \
-            -movflags +faststart \
-            "$output_file" -y -loglevel error -stats
+        extra_inputs+=(-i "$TEMP_DIR/audio.mka")
+        extra_maps+=(-map 1:a)
+        extra_codecs+=(-c:a copy)
     fi
+    if [[ "$HAS_SUBS" == true && -f "$TEMP_DIR/subs.mkv" ]]; then
+        local sub_idx=1
+        [[ "$HAS_AUDIO" == true && -f "$TEMP_DIR/audio.mka" ]] && sub_idx=2
+        extra_inputs+=(-i "$TEMP_DIR/subs.mkv")
+        extra_maps+=(-map "${sub_idx}:s")
+        extra_codecs+=(-c:s copy)
+    fi
+
+    ffmpeg \
+        -framerate "$fps" \
+        -pattern_type glob -i "$frames_dir/frame_*.png" \
+        "${extra_inputs[@]}" \
+        -map 0:v \
+        "${extra_maps[@]}" \
+        -vf "$vf_out" \
+        -c:v libx265 -crf "$crf" -preset "$x265_preset" \
+        -pix_fmt yuv420p10le \
+        -x265-params "no-open-gop=1:keyint=250:bframes=8:aq-mode=3" \
+        "${extra_codecs[@]}" \
+        -movflags +faststart \
+        "$output_file" -y -loglevel error -stats
 
     print_success "Output saved: $output_file"
 }
@@ -1258,11 +1296,17 @@ simple_scale() {
         *)      print_error "Unknown quality: $QUALITY"; exit 1 ;;
     esac
 
+    local -a extra_codecs=(-c:a copy)
+    if [[ "$HAS_SUBS" == true ]]; then
+        extra_codecs+=(-c:s copy)
+    fi
+
     ffmpeg -i "$input_file" \
+        -map 0 \
         -vf "scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=lanczos" \
         -c:v libx265 -crf "$crf" -preset "$ENCODE_SPEED" \
         -pix_fmt yuv420p10le \
-        -c:a copy \
+        "${extra_codecs[@]}" \
         -movflags +faststart \
         "$output_file" -y -loglevel error -stats
 
@@ -1480,6 +1524,7 @@ if [[ "$RESUME" == false ]]; then
     rm -f  "$TEMP_DIR/upscale.py"
     rm -f  "$TEMP_DIR/upscale_temporal.py"
     rm -f  "$TEMP_DIR/audio.mka"
+    rm -f  "$TEMP_DIR/subs.mkv"
 fi
 
 mkdir -p "$TEMP_DIR/frames"
@@ -1511,6 +1556,7 @@ if [[ "$USE_AI" == true ]]; then
     fi
 
     extract_audio "$INPUT_FILE"
+    extract_subs "$INPUT_FILE"
     run_prefilter "$INPUT_FILE"
     upscale_video "$OUTPUT_FILE"
 else
