@@ -149,9 +149,9 @@ Output:
   --sharpen                 Apply unsharp mask to final output
 
 Performance / quality (single-frame models):
-  -t, --tile SIZE           Tile size (auto-selected by source resolution)
+  -t, --tile SIZE           Tile size (default: auto — probes GPU VRAM after model load)
   --tile-pad SIZE           Tile overlap padding (default: 64)
-  --full-precision          Use float32 instead of float16
+  --full-precision          Use float32 instead of float16 (auto for hat/nomos8kdat)
 
 Temporal model options:
   --temporal-window N       Sliding window size in frames (default: 15)
@@ -207,17 +207,9 @@ Controls the sliding window size for temporal models (default: 15). A larger win
 
 ### --tile / --tile-pad
 
-Tile size is auto-selected based on the source resolution (single-frame models only):
+Tile size defaults to **auto** — after loading the model, the script probes GPU VRAM by running a test frame with descending tile sizes (full-frame → 768 → 512 → 384 → 256 → 192 → 128) and selects the largest size that fits. This automatically adapts to any GPU, model, and precision combination.
 
-| Source | Auto tile | Behaviour |
-|--------|-----------|-----------|
-| ≤ 720p | `0` | Full-frame — no tiling (fastest for RRDB models with 16GB VRAM) |
-| 1080p  | `1024` | 2x2 tiles |
-| 1440p+ | `512` | 3x3 or more tiles |
-
-Pass `-t SIZE` to override. Reduce to `256` or `128` if you hit VRAM limits. Tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance.
-
-> **Note on `-t 0` (full-frame):** Full-frame inference is faster for RRDB-based models on ≤720p content with enough VRAM. **Not suitable for transformer models** (`nomos8kdat`, `hat`) — attention mechanisms make full-frame inference extremely slow and can produce NaN artifacts in float16.
+Pass `-t SIZE` to override with a specific value. Tile-pad controls how many pixels of overlap context each tile borrows from its neighbours — the default of 64 is a good balance. There is no quality loss from tiling.
 
 ### --resume
 
@@ -225,7 +217,7 @@ The upscaler writes each frame as a PNG to a temp folder as it goes. If a run is
 
 ### --full-precision
 
-Uses float32 instead of float16 for model inference. The quality difference is marginal. Only relevant if you notice specific precision-related artifacts. Uses roughly 2x the VRAM.
+Uses float32 instead of float16 for model inference. Auto-enabled for transformer models (`hat`, `nomos8kdat`) which overflow float16. For RRDB models the quality difference is marginal. Uses roughly 2x the VRAM — the auto tile probe accounts for this.
 
 ### --sharpen
 

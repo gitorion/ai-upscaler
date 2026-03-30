@@ -24,7 +24,7 @@ TEMP_DIR="$SCRIPT_DIR/temp"
 VENV_DIR="$SCRIPT_DIR/venv"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-TILE_SIZE=512
+TILE_SIZE="auto"
 TILE_SIZE_EXPLICIT=false
 TILE_PAD=64
 MODEL_KEY="nomos8k"
@@ -115,12 +115,14 @@ Output:
   --sharpen                 Apply mild unsharp mask to final output
 
 Performance / quality (single-frame models only):
-  -t, --tile SIZE           Tile size for GPU processing (auto by source resolution)
-                              0      Full-frame — no tiling (auto for ≤720p, RRDB models only)
-                              1024   2×2 tiles (auto for 1080p)
-                              512    3×3+ tiles (auto for 1440p/2160p)
-                            Note: do NOT use -t 0 with transformer models (nomos8kdat, hat)
-                            Reduce on low VRAM: 256, 128
+  -t, --tile SIZE           Tile size for GPU processing [default: auto]
+                            Auto mode probes GPU VRAM after model load and selects the
+                            largest tile size that fits. Override with an explicit value:
+                              0      Full-frame — no tiling (fastest, needs most VRAM)
+                              768    Large tiles
+                              512    Medium tiles
+                              256    Small tiles (safe for transformer models on 16GB)
+                              128    Minimum — for very low VRAM
   --tile-pad SIZE           Tile overlap padding in pixels (default: 64)
                             Increase to reduce seam artifacts; decrease to save VRAM
   --full-precision          Use float32 instead of float16 (marginal quality gain, uses more VRAM)
@@ -594,6 +596,44 @@ def tile_process(model, img_tensor, model_scale, tile_size, tile_pad):
     return output
 
 
+def probe_tile_size(model, model_scale, src_h, src_w, tile_pad, device, use_half):
+    """Try descending tile sizes on a dummy frame to find the largest that fits in VRAM."""
+    candidates = [0, 768, 512, 384, 256, 192, 128]
+
+    dtype = torch.float16 if use_half else torch.float32
+    dummy = torch.rand(1, 3, src_h, src_w, dtype=dtype, device=device)
+    print(f"Probing optimal tile size for {src_w}x{src_h} input...", flush=True)
+
+    with torch.no_grad():
+        for size in candidates:
+            torch.cuda.empty_cache()
+            try:
+                if size == 0:
+                    img_pad, pw, ph = pad_to_multiple(dummy, WINDOW_MULTIPLE)
+                    out = model(img_pad).float()
+                    del out, img_pad
+                else:
+                    out = tile_process(model, dummy, model_scale, size, tile_pad)
+                    del out
+                del dummy
+                torch.cuda.empty_cache()
+                label = "full-frame" if size == 0 else str(size)
+                print(f"Auto tile: {label} — OK", flush=True)
+                return size
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    torch.cuda.empty_cache()
+                    label = "full-frame" if size == 0 else str(size)
+                    print(f"Auto tile: {label} — OOM, trying smaller", flush=True)
+                    continue
+                raise
+
+    del dummy
+    torch.cuda.empty_cache()
+    print("Auto tile: all sizes OOM — using 128 as minimum", flush=True)
+    return 128
+
+
 def upscale_video(input_video, frames_dir, model_path,
                   tile_size, tile_pad, output_w, output_h,
                   use_full_precision, resume):
@@ -617,6 +657,14 @@ def upscale_video(input_video, frames_dir, model_path,
     os.makedirs(frames_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(input_video)
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Auto-probe optimal tile size if requested
+    if tile_size < 0:
+        tile_size = probe_tile_size(model, model_scale, src_h, src_w, tile_pad, device, use_half)
+    tile_label = "full-frame" if tile_size == 0 else str(tile_size)
+    print(f"Tile size: {tile_label}", flush=True)
 
     # Use ffprobe for reliable fps/frame-count (OpenCV is unreliable on MKV/FFV1)
     import subprocess, json as _json
@@ -792,7 +840,7 @@ if __name__ == '__main__':
         input_video        = input_video,
         frames_dir         = frames_dir,
         model_path         = model_path,
-        tile_size          = int(tile_size),
+        tile_size          = -1 if tile_size == 'auto' else int(tile_size),
         tile_pad           = int(tile_pad),
         output_w           = int(output_w),
         output_h           = int(output_h),
@@ -1206,8 +1254,8 @@ upscale_video() {
         # Single-frame pipeline — spandrel models
         write_python_script
         local tile_note="$TILE_SIZE"
+        [[ "$TILE_SIZE" == "auto" ]] && tile_note="auto (probing GPU)"
         [[ "$TILE_SIZE" == "0" ]] && tile_note="0 (full-frame)"
-        [[ "$TILE_SIZE_EXPLICIT" == false ]] && tile_note+=" (auto)"
         print_info "Starting AI upscaling..."
         print_info "Model: $MODEL_KEY  |  Tile: ${tile_note}  |  Tile-pad: ${TILE_PAD}  |  Prefilter: ${PREFILTER}"
 
@@ -1574,27 +1622,8 @@ if [[ "$USE_AI" == true ]]; then
         ;;
     esac
 
-    # Auto-select tile size for single-frame models (not used by temporal pipeline).
-    # Full-frame (tile=0) is only beneficial for RRDB-based models (nomos8k, realesrgan,
-    # lsdir, ultrasharp) — transformer models (nomos8kdat, hat, span) run dramatically
-    # slower at tile=0 due to attention mechanisms. Use -t 0 explicitly only when you
-    # know you are running an RRDB model and have enough VRAM.
-    if [[ "$IS_TEMPORAL" == false && "$TILE_SIZE_EXPLICIT" == false ]]; then
-        # Transformer models (hat, nomos8kdat) cannot use full-frame — always tile
-        case "$MODEL_KEY" in
-        hat|nomos8kdat)
-            TILE_SIZE=256    # float32 + large model weights — needs small tiles on 16GB
-            ;;
-        *)
-            if (( INPUT_HEIGHT <= 720 )); then
-                TILE_SIZE=0        # full-frame — fastest for RRDB models on ≤720p with 16GB VRAM
-            elif (( INPUT_HEIGHT <= 1080 )); then
-                TILE_SIZE=1024     # 2×2 tiles for 1080p
-            fi
-            ;;
-        esac
-        # 1440p / 2160p keep the 512 default
-    fi
+    # Tile size: if user didn't pass -t, Python will auto-probe the optimal size.
+    # If user passed -t explicitly, that value is used as-is.
 
     extract_audio "$INPUT_FILE"
     extract_subs "$INPUT_FILE"
