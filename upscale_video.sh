@@ -169,14 +169,14 @@ Examples:
 Model downloads (place .pth files in $MODEL_DIR):
   nomos8k      openmodeldb.info                           → 4xNomos8kSC.pth
   nomos8kdat   openmodeldb.info                           → 4xNomos8kDAT.pth
-  lsdir        github.com/Phhofm/models                  → 4xLSDIR.pth
+  lsdir        openmodeldb.info/models/4x-LSDIR           → 4xLSDIR.pth
   ultrasharp   huggingface.co/Kim2091/UltraSharp          → 4x-UltraSharp.pth
   realesrgan   github.com/xinntao/Real-ESRGAN             → RealESRGAN_x4plus.pth
   atdjpg        github.com/Phhofm/models                  → 4xNomos8k_atd_jpg.pth
   nomos8kschat  Google Drive (Phhofm)                     → 4xNomos8kSCHAT-L.pth
                 wget -O ~/ai-upscale/models/4xNomos8kSCHAT-L.pth \
                 "https://drive.usercontent.google.com/download?id=1gh7HDKzf9aZw-rA8WYQy1ZZ8D0MAIHxR&export=download&confirm=t"
-  hat          github.com/XPixelGroup/HAT/releases        → HAT-L_SRx4_ImageNet-pretrain.pth
+  hat          huggingface.co/anchuang/HAT-L_SRx4_ImageNet-pretrain → HAT-L_SRx4_ImageNet-pretrain.pth
                (requires: pip install spandrel-extra-arches)
   basicvsr     openmmlab CDN                              → BasicVSR_PlusPlus_REDS4.pth
                wget -O ~/ai-upscale/models/BasicVSR_PlusPlus_REDS4.pth \

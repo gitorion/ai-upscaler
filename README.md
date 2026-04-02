@@ -26,24 +26,61 @@ The installer handles NVIDIA drivers, CUDA, FFmpeg, Python environment, core dep
 
 ## Model Setup
 
-The installer downloads BasicVSR++ and SPyNet weights automatically. The default single-frame model (`4xNomos8kSC.pth`) must be downloaded manually to `~/ai-upscale/models/`.
+The installer downloads BasicVSR++ and SPyNet weights automatically. All single-frame models must be downloaded manually to `~/ai-upscale/models/`.
 
 ### Single-frame models (spandrel)
 
 Process one frame at a time. No additional dependencies beyond the base install.
 
-| Key | Filename | Best for | Speed (4060 Ti 16GB) | Download |
-|-----|----------|----------|----------------------|----------|
-| `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **default** | ~4 s/frame @ 480p | openmodeldb.info |
-| `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on clean sources | ~4 s/frame @ 480p | huggingface.co/Kim2091/UltraSharp |
-| `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4 s/frame @ 480p | openmodeldb.info |
-| `atdjpg` | `4xNomos8k_atd_jpg.pth` | Best for heavily compressed/degraded sources | ~6 s/frame @ 480p | github.com/Phhofm/models |
-| `nomos8kschat` | `4xNomos8kSCHAT-L.pth` | HAT-L quality on real-world/compressed sources | ~20 s/frame @ 480p | Google Drive (Phhofm) |
-| `hat` | `HAT-L_SRx4_ImageNet-pretrain.pth` | Highest fidelity transformer, clean sources only | ~20 s/frame @ 480p | github.com/XPixelGroup/HAT/releases |
-| `nomos8kdat` | `4xNomos8kDAT.pth` | DAT transformer — very slow, short clips only | ~24 s/frame @ 480p | openmodeldb.info |
-| `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | ~4 s/frame @ 480p | github.com/xinntao/Real-ESRGAN/releases |
+| Key | Filename | Best for | Speed (4060 Ti 16GB) |
+|-----|----------|----------|----------------------|
+| `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **default** | ~4 s/frame @ 480p |
+| `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on clean sources | ~4 s/frame @ 480p |
+| `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4 s/frame @ 480p |
+| `atdjpg` | `4xNomos8k_atd_jpg.pth` | Best for heavily compressed/degraded sources | ~6 s/frame @ 480p |
+| `nomos8kschat` | `4xNomos8kSCHAT-L.pth` | HAT-L quality on real-world/compressed sources | ~20 s/frame @ 480p |
+| `hat` | `HAT-L_SRx4_ImageNet-pretrain.pth` | Highest fidelity transformer, clean sources only | ~20 s/frame @ 480p |
+| `nomos8kdat` | `4xNomos8kDAT.pth` | DAT transformer — very slow, short clips only | ~24 s/frame @ 480p |
+| `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | ~4 s/frame @ 480p |
 
 Note: `hat` additionally requires `pip install spandrel-extra-arches` in the venv.
+
+#### Download commands
+
+```bash
+cd ~/ai-upscale/models
+
+# nomos8k (default) — 64 MB
+wget -O 4xNomos8kSC.pth \
+  "https://github.com/Phhofm/models/releases/download/4xNomos8kSC/4xNomos8kSC.pth"
+
+# ultrasharp — 64 MB
+wget -O 4x-UltraSharp.pth \
+  "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth"
+
+# lsdir — 64 MB (download via browser from openmodeldb.info/models/4x-LSDIR)
+# No direct wget link available — download 4xLSDIR.pth and place in ~/ai-upscale/models/
+
+# atdjpg — 78 MB (ATD transformer, best for heavy JPEG/compression artifacts)
+wget -O 4xNomos8k_atd_jpg.pth \
+  "https://github.com/Phhofm/models/releases/download/4xNomos8k_atd_jpg/4xNomos8k_atd_jpg.pth"
+
+# nomos8kschat — 316 MB (HAT-L fine-tuned on Nomos8k)
+wget -O 4xNomos8kSCHAT-L.pth \
+  "https://drive.usercontent.google.com/download?id=1gh7HDKzf9aZw-rA8WYQy1ZZ8D0MAIHxR&export=download&confirm=t"
+
+# hat — 158 MB (requires: pip install spandrel-extra-arches)
+wget -O HAT-L_SRx4_ImageNet-pretrain.pth \
+  "https://huggingface.co/anchuang/HAT-L_SRx4_ImageNet-pretrain/resolve/main/HAT-L_SRx4_ImageNet-pretrain.pth"
+
+# nomos8kdat — 147 MB
+wget -O 4xNomos8kDAT.pth \
+  "https://github.com/Phhofm/models/releases/download/4xNomos8kDAT/4xNomos8kDAT.pth"
+
+# realesrgan — 64 MB
+wget -O RealESRGAN_x4plus.pth \
+  "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+```
 
 ### Temporal models (basicsr)
 
