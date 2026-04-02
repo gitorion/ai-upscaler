@@ -2,7 +2,8 @@
 
 ##############################################################################
 # AI Video Upscaler — spandrel + basicsr edition
-# Single-frame models: nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat, atdjpg, nomos8kschat
+# Single-frame models: nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat, atdjpg, nomos8kschat,
+#                      spanweak, spanmedium, spanstrong, webphoto, nomos2plksr
 # Temporal models:     basicvsr, realbasicvsr  (multi-frame, requires basicsr)
 # Optimised for live-action, compressed/noisy, artifact-heavy sources
 # Requires: FFmpeg, Python 3, spandrel, CUDA GPU
@@ -51,6 +52,11 @@ declare -A MODEL_FILES=(
     [hat]="HAT-L_SRx4_ImageNet-pretrain.pth"
     [atdjpg]="4xNomos8k_atd_jpg.pth"
     [nomos8kschat]="4xNomos8kSCHAT-L.pth"
+    [spanweak]="4xNomos8k_span_otf_weak.pth"
+    [spanmedium]="4xNomos8k_span_otf_medium.pth"
+    [spanstrong]="4xNomos8k_span_otf_strong.pth"
+    [webphoto]="4xNomosWebPhoto_RealPLKSR.pth"
+    [nomos2plksr]="4xNomos2_realplksr_dysample.pth"
 )
 
 # ── Temporal model registry (basicsr) — all 4x ───────────────────────────────
@@ -84,14 +90,26 @@ Required:
 
 Model selection (-m / --model):
   ── Single-frame models (spandrel) ──────────────────────────────────────────
-  nomos8k       Best all-round for compressed live-action — fast (~4s/frame)  ← default
-  atdjpg        ATD transformer — best for heavily compressed/degraded sources (JPEG q40+)
-  nomos8kschat  HAT-L fine-tuned on Nomos8k — HAT quality on compressed/real-world sources (slow)
-  nomos8kdat    DAT transformer — highest single-frame quality, ~6× slower (~22s/frame)
-  lsdir       Sharp detail, handles real-world degradations
-  ultrasharp  Maximum sharpness (better on cleaner sources)
-  realesrgan  Real-ESRGAN x4plus (legacy fallback)
-  hat         HAT-L — highest fidelity single-frame, clean sources only
+  SPAN (~0.5-1 s/frame — fastest):
+  spanmedium    SPAN on Nomos8k + real-world degradation (medium)             ← best fast option
+  spanweak      SPAN on Nomos8k — lighter degradation (better/cleaner sources)
+  spanstrong    SPAN on Nomos8k — heavy degradation (badly compressed sources)
+
+  RealPLKSR (~1-2 s/frame — fast):
+  webphoto      RealPLKSR — web/streaming sources (lens blur + JPEG/WebP + noise)
+  nomos2plksr   RealPLKSR — cleaner compressed sources (JPEG only, less aggressive)
+
+  RRDB (~4 s/frame — standard):
+  nomos8k       Best all-round for compressed live-action                     ← default
+  lsdir         Sharp detail, handles real-world degradations
+  ultrasharp    Maximum sharpness (better on cleaner sources)
+  realesrgan    Real-ESRGAN x4plus (legacy fallback)
+
+  Transformer (20-60 s/frame — slow, short clips only):
+  atdjpg        ATD — best for heavily JPEG-compressed/degraded sources
+  nomos8kschat  HAT-L fine-tuned on Nomos8k — HAT quality on real-world sources
+  hat           HAT-L — highest fidelity, clean sources only
+  nomos8kdat    DAT — highest single-frame quality
 
   ── Temporal models (basicsr) — multi-frame, best temporal consistency ─────
   basicvsr    BasicVSR++ — strong on real-world degraded video  (requires basicsr)
@@ -167,15 +185,19 @@ Examples:
   $0 -i film.mkv -r 2160p -t 256 --sharpen
 
 Model downloads (place .pth files in $MODEL_DIR):
-  nomos8k      openmodeldb.info                           → 4xNomos8kSC.pth
+  See README for full wget commands. Quick reference:
+  nomos8k      github.com/Phhofm/models                  → 4xNomos8kSC.pth
+  spanmedium   Google Drive (helaman)                     → 4xNomos8k_span_otf_medium.pth
+  spanweak     Google Drive (helaman)                     → 4xNomos8k_span_otf_weak.pth
+  spanstrong   Google Drive (helaman)                     → 4xNomos8k_span_otf_strong.pth
+  webphoto     github.com/Phhofm/models                  → 4xNomosWebPhoto_RealPLKSR.pth
+  nomos2plksr  github.com/Phhofm/models                  → 4xNomos2_realplksr_dysample.pth
   nomos8kdat   openmodeldb.info                           → 4xNomos8kDAT.pth
   lsdir        openmodeldb.info/models/4x-LSDIR           → 4xLSDIR.pth
   ultrasharp   huggingface.co/Kim2091/UltraSharp          → 4x-UltraSharp.pth
   realesrgan   github.com/xinntao/Real-ESRGAN             → RealESRGAN_x4plus.pth
-  atdjpg        github.com/Phhofm/models                  → 4xNomos8k_atd_jpg.pth
-  nomos8kschat  Google Drive (Phhofm)                     → 4xNomos8kSCHAT-L.pth
-                wget -O ~/ai-upscale/models/4xNomos8kSCHAT-L.pth \
-                "https://drive.usercontent.google.com/download?id=1gh7HDKzf9aZw-rA8WYQy1ZZ8D0MAIHxR&export=download&confirm=t"
+  atdjpg       github.com/Phhofm/models                  → 4xNomos8k_atd_jpg.pth
+  nomos8kschat Google Drive (Phhofm)                     → 4xNomos8kSCHAT-L.pth
   hat          huggingface.co/anchuang/HAT-L_SRx4_ImageNet-pretrain → HAT-L_SRx4_ImageNet-pretrain.pth
                (requires: pip install spandrel-extra-arches)
   basicvsr     openmmlab CDN                              → BasicVSR_PlusPlus_REDS4.pth
@@ -1503,31 +1525,49 @@ interactive_setup() {
     echo -e "${BLUE}AI model:${NC}"
     echo ""
     echo -e "  ${GREEN}Single-frame models${NC} (process each frame independently)"
-    echo "  1) nomos8k      — Best all-rounder for compressed video [default]"
-    echo "  2) atdjpg        — Best for heavily compressed/degraded sources (JPEG, DVD rips)"
-    echo "  3) nomos8kschat  — HAT-L on Nomos8k — HAT quality on real-world/compressed sources (slow)"
-    echo "  4) ultrasharp    — Maximum sharpness on clean sources (Blu-ray, high-quality)"
-    echo "  5) lsdir         — Sharp detail on real-world degraded content"
-    echo "  6) hat           — Highest fidelity transformer model, clean sources only (slow)"
-    echo "  7) nomos8kdat    — DAT transformer, very slow, short clips only"
-    echo "  8) realesrgan    — Legacy fallback"
     echo ""
-    echo -e "  ${GREEN}Temporal models${NC} (process multiple frames — better consistency, much faster)"
-    echo "  9) basicvsr      — Best for long content (TV/movies), degraded or compressed sources"
+    echo -e "  ${YELLOW}SPAN — fastest (~0.5-1 s/frame):${NC}"
+    echo "   1) spanmedium   — Nomos8k + real-world degradation, medium [best fast option]"
+    echo "   2) spanweak     — Nomos8k, light degradation (cleaner/better sources)"
+    echo "   3) spanstrong   — Nomos8k, heavy degradation (badly compressed sources)"
+    echo ""
+    echo -e "  ${YELLOW}RealPLKSR — fast (~1-2 s/frame):${NC}"
+    echo "   4) webphoto     — Web/streaming sources: lens blur + JPEG/WebP + noise"
+    echo "   5) nomos2plksr  — Cleaner compressed sources (JPEG only, less aggressive)"
+    echo ""
+    echo -e "  ${YELLOW}RRDB — standard (~4 s/frame):${NC}"
+    echo "   6) nomos8k      — Best all-rounder for compressed live-action [default]"
+    echo "   7) lsdir        — Sharp detail on real-world degraded content"
+    echo "   8) ultrasharp   — Maximum sharpness on clean sources (Blu-ray)"
+    echo "   9) realesrgan   — Legacy fallback"
+    echo ""
+    echo -e "  ${YELLOW}Transformer — slow (20-60 s/frame, short clips only):${NC}"
+    echo "  10) atdjpg       — Best for heavily JPEG-compressed/degraded sources"
+    echo "  11) nomos8kschat — HAT-L on Nomos8k, real-world/compressed sources"
+    echo "  12) hat          — Highest fidelity, clean sources only"
+    echo "  13) nomos8kdat   — DAT transformer, highest quality"
+    echo ""
+    echo -e "  ${GREEN}Temporal models${NC} (multi-frame — best consistency, much faster for long content)"
+    echo "  14) basicvsr     — Best for TV/movies, degraded or compressed sources"
     echo ""
     while true; do
-        read -rp "Choose [1-9, default=1]: " model_choice
+        read -rp "Choose [1-14, default=1]: " model_choice
         local selected_key=""
         case "${model_choice:-1}" in
-            1) selected_key="nomos8k"       ;;
-            2) selected_key="atdjpg"        ;;
-            3) selected_key="nomos8kschat"  ;;
-            4) selected_key="ultrasharp"    ;;
-            5) selected_key="lsdir"         ;;
-            6) selected_key="hat"           ;;
-            7) selected_key="nomos8kdat"    ;;
-            8) selected_key="realesrgan"    ;;
-            9) selected_key="basicvsr"      ;;
+            1)  selected_key="spanmedium"   ;;
+            2)  selected_key="spanweak"     ;;
+            3)  selected_key="spanstrong"   ;;
+            4)  selected_key="webphoto"     ;;
+            5)  selected_key="nomos2plksr"  ;;
+            6)  selected_key="nomos8k"      ;;
+            7)  selected_key="lsdir"        ;;
+            8)  selected_key="ultrasharp"   ;;
+            9)  selected_key="realesrgan"   ;;
+            10) selected_key="atdjpg"       ;;
+            11) selected_key="nomos8kschat" ;;
+            12) selected_key="hat"          ;;
+            13) selected_key="nomos8kdat"   ;;
+            14) selected_key="basicvsr"     ;;
             *) echo "  Invalid choice, try again."; continue ;;
         esac
         # Validate model file exists

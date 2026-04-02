@@ -32,16 +32,38 @@ The installer downloads BasicVSR++ and SPyNet weights automatically. All single-
 
 Process one frame at a time. No additional dependencies beyond the base install.
 
+**SPAN — fastest (~0.5–1 s/frame)**
+
+| Key | Filename | Best for | Speed (4060 Ti 16GB) |
+|-----|----------|----------|----------------------|
+| `spanmedium` | `4xNomos8k_span_otf_medium.pth` | Real-world degraded sources — best fast all-rounder | ~1 s/frame @ 480p |
+| `spanweak` | `4xNomos8k_span_otf_weak.pth` | Light degradation — better/cleaner sources | ~1 s/frame @ 480p |
+| `spanstrong` | `4xNomos8k_span_otf_strong.pth` | Heavy degradation — badly compressed sources | ~1 s/frame @ 480p |
+
+**RealPLKSR — fast (~1–2 s/frame)**
+
+| Key | Filename | Best for | Speed (4060 Ti 16GB) |
+|-----|----------|----------|----------------------|
+| `webphoto` | `4xNomosWebPhoto_RealPLKSR.pth` | Web/streaming: lens blur + JPEG/WebP + noise | ~2 s/frame @ 480p |
+| `nomos2plksr` | `4xNomos2_realplksr_dysample.pth` | Cleaner compressed sources, less aggressive | ~2 s/frame @ 480p |
+
+**RRDB — standard (~4 s/frame)**
+
 | Key | Filename | Best for | Speed (4060 Ti 16GB) |
 |-----|----------|----------|----------------------|
 | `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **default** | ~4 s/frame @ 480p |
-| `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on clean sources | ~4 s/frame @ 480p |
 | `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4 s/frame @ 480p |
-| `atdjpg` | `4xNomos8k_atd_jpg.pth` | Best for heavily compressed/degraded sources | ~6 s/frame @ 480p |
+| `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on clean sources | ~4 s/frame @ 480p |
+| `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | ~4 s/frame @ 480p |
+
+**Transformer — slow (20–60 s/frame, short clips only)**
+
+| Key | Filename | Best for | Speed (4060 Ti 16GB) |
+|-----|----------|----------|----------------------|
+| `atdjpg` | `4xNomos8k_atd_jpg.pth` | Best for heavily JPEG-compressed/degraded sources | ~6 s/frame @ 480p |
 | `nomos8kschat` | `4xNomos8kSCHAT-L.pth` | HAT-L quality on real-world/compressed sources | ~20 s/frame @ 480p |
 | `hat` | `HAT-L_SRx4_ImageNet-pretrain.pth` | Highest fidelity transformer, clean sources only | ~20 s/frame @ 480p |
-| `nomos8kdat` | `4xNomos8kDAT.pth` | DAT transformer — very slow, short clips only | ~24 s/frame @ 480p |
-| `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | ~4 s/frame @ 480p |
+| `nomos8kdat` | `4xNomos8kDAT.pth` | DAT transformer — highest quality, short clips only | ~24 s/frame @ 480p |
 
 Note: `hat` additionally requires `pip install spandrel-extra-arches` in the venv.
 
@@ -49,6 +71,32 @@ Note: `hat` additionally requires `pip install spandrel-extra-arches` in the ven
 
 ```bash
 cd ~/ai-upscale/models
+
+# ── SPAN (~0.5-1 s/frame) ────────────────────────────────────────────────────
+
+# spanmedium — 8.6 MB
+wget -O 4xNomos8k_span_otf_medium.pth \
+  "https://drive.usercontent.google.com/download?id=1M1bgiMOuOoZkArB-JkKoZiDNoHlpar2X&export=download&confirm=t"
+
+# spanweak — 8.6 MB
+wget -O 4xNomos8k_span_otf_weak.pth \
+  "https://drive.usercontent.google.com/download?id=1KkV23QH3oBAtl88HBKMq88cdWEv0J2hV&export=download&confirm=t"
+
+# spanstrong — 8.6 MB
+wget -O 4xNomos8k_span_otf_strong.pth \
+  "https://drive.usercontent.google.com/download?id=1K_OUt9lwvDXn280OTfURm0tD3E0lVZ5b&export=download&confirm=t"
+
+# ── RealPLKSR (~1-2 s/frame) ─────────────────────────────────────────────────
+
+# webphoto — 28 MB
+wget -O 4xNomosWebPhoto_RealPLKSR.pth \
+  "https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_RealPLKSR/4xNomosWebPhoto_RealPLKSR.pth"
+
+# nomos2plksr — 28 MB
+wget -O 4xNomos2_realplksr_dysample.pth \
+  "https://github.com/Phhofm/models/releases/download/4xNomos2_realplksr_dysample/4xNomos2_realplksr_dysample.pth"
+
+# ── RRDB (~4 s/frame) ────────────────────────────────────────────────────────
 
 # nomos8k (default) — 64 MB
 wget -O 4xNomos8kSC.pth \
@@ -58,14 +106,20 @@ wget -O 4xNomos8kSC.pth \
 wget -O 4x-UltraSharp.pth \
   "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth"
 
-# lsdir — 64 MB (download via browser from openmodeldb.info/models/4x-LSDIR)
-# No direct wget link available — download 4xLSDIR.pth and place in ~/ai-upscale/models/
+# lsdir — 64 MB (no direct link — download via browser)
+# Visit: openmodeldb.info/models/4x-LSDIR — place 4xLSDIR.pth in ~/ai-upscale/models/
 
-# atdjpg — 78 MB (ATD transformer, best for heavy JPEG/compression artifacts)
+# realesrgan — 64 MB
+wget -O RealESRGAN_x4plus.pth \
+  "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+
+# ── Transformer (20-60 s/frame, short clips only) ────────────────────────────
+
+# atdjpg — 78 MB
 wget -O 4xNomos8k_atd_jpg.pth \
   "https://github.com/Phhofm/models/releases/download/4xNomos8k_atd_jpg/4xNomos8k_atd_jpg.pth"
 
-# nomos8kschat — 316 MB (HAT-L fine-tuned on Nomos8k)
+# nomos8kschat — 316 MB
 wget -O 4xNomos8kSCHAT-L.pth \
   "https://drive.usercontent.google.com/download?id=1gh7HDKzf9aZw-rA8WYQy1ZZ8D0MAIHxR&export=download&confirm=t"
 
@@ -76,10 +130,6 @@ wget -O HAT-L_SRx4_ImageNet-pretrain.pth \
 # nomos8kdat — 147 MB
 wget -O 4xNomos8kDAT.pth \
   "https://github.com/Phhofm/models/releases/download/4xNomos8kDAT/4xNomos8kDAT.pth"
-
-# realesrgan — 64 MB
-wget -O RealESRGAN_x4plus.pth \
-  "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 ```
 
 ### Temporal models (basicsr)
@@ -173,8 +223,11 @@ Required:
                              (omit for interactive mode)
 
 Model:
-  -m, --model TYPE          nomos8k (default), ultrasharp, lsdir, hat,
-                            nomos8kdat, realesrgan, basicvsr
+  -m, --model TYPE          SPAN: spanmedium (fast default), spanweak, spanstrong
+                            RealPLKSR: webphoto, nomos2plksr
+                            RRDB: nomos8k (default), lsdir, ultrasharp, realesrgan
+                            Transformer: atdjpg, nomos8kschat, hat, nomos8kdat
+                            Temporal: basicvsr
 
 Pre-processing:
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -227,16 +280,30 @@ Use for: old TV recordings, broadcast captures, DVD rips, VHS sources. Safe to e
 
 All models are 4x. Selection guide:
 
-**Single-frame (spandrel) — process one frame at a time:**
+**SPAN (~0.5–1 s/frame) — fastest single-frame tier:**
+
+- **spanmedium** — SPAN architecture trained on Nomos8k with medium OTF degradation (resize, blur, JPEG compression). Best fast all-rounder — directly comparable to `nomos8k` in quality at 4-8x the speed. First choice for long-form content where RRDB is too slow.
+- **spanweak** — Same architecture, lighter degradation. Better for sources that are compressed but not severely damaged.
+- **spanstrong** — Same architecture, heavier degradation. Best for badly compressed or heavily artifacted sources when speed is still required.
+
+**RealPLKSR (~1–2 s/frame) — fast, real-world trained:**
+
+- **webphoto** — RealPLKSR trained on Nomos-v2 with the full realistic degradation pipeline: lens blur, realistic noise (LUDVAE), JPEG and WebP re-compression down to quality 40. Specifically targets the web/streaming download chain. 2-4x faster than RRDB.
+- **nomos2plksr** — RealPLKSR on Nomos-v2, lighter JPEG-only degradation. Better for sources that are compressed but otherwise clean. Slightly less aggressive than `webphoto`.
+
+**RRDB (~4 s/frame) — standard single-frame:**
 
 - **nomos8k** — RRDB-based, trained on real-world degradations. Fast and reliable. Best all-rounder for compressed video. **Default.**
-- **atdjpg** — ATD (Adaptive Token Dictionary) transformer trained on Nomos8k with aggressive JPEG compression (down to quality 40), re-compression, blur, and resizes. Best single-frame model for heavily compressed/degraded sources — DVD rips, old web downloads, heavily transcoded files. Preserves film grain rather than smoothing it. Auto full-precision, auto tile probing.
-- **nomos8kschat** — HAT-L fine-tuned on Nomos8k with real-world JPEG/blur degradation. Brings HAT-L's transformer quality to compressed and degraded sources rather than clean bicubic ones. Direct upgrade path over `nomos8k` when speed is not a constraint. Auto full-precision, auto tile probing. ~20 s/frame.
 - **ultrasharp** — Maximum perceived sharpness on clean sources. Can over-sharpen noisy inputs.
 - **lsdir** — Sharp edges and fine detail on real-world degraded content.
-- **hat** — Hybrid Attention Transformer. Highest fidelity single-frame model, designed for clean sources. Pair with `--prefilter none`. Slow (~2x nomos8k).
-- **nomos8kdat** — DAT transformer. Very slow (~6x nomos8k) — short clips only.
 - **realesrgan** — The original RealESRGAN x4plus. Kept as a legacy fallback.
+
+**Transformer (20–60 s/frame) — short clips only:**
+
+- **atdjpg** — ATD transformer trained on Nomos8k with aggressive JPEG compression (down to quality 40), re-compression, blur, and resizes. Best single-frame model for heavily compressed/degraded sources — DVD rips, old web downloads, heavily transcoded files. Preserves film grain. Auto full-precision, auto tile probing.
+- **nomos8kschat** — HAT-L fine-tuned on Nomos8k with real-world JPEG/blur degradation. Brings HAT-L transformer quality to compressed sources rather than clean bicubic ones. Direct quality ceiling over `nomos8k` when speed is not a constraint. Auto full-precision, auto tile probing.
+- **hat** — Hybrid Attention Transformer trained on clean ImageNet. Highest fidelity for clean sources. Pair with `--prefilter none`.
+- **nomos8kdat** — DAT transformer. Highest single-frame quality available — very slow, short clips only.
 
 **Temporal (basicsr) — process a sliding window of frames:**
 
@@ -258,7 +325,7 @@ The upscaler writes each frame as a PNG to a temp folder as it goes. If a run is
 
 ### --full-precision
 
-Uses float32 instead of float16 for model inference. Auto-enabled for transformer models (`hat`, `nomos8kdat`, `atdjpg`, `nomos8kschat`) which overflow float16. For RRDB models the quality difference is marginal. Uses roughly 2x the VRAM — the auto tile probe accounts for this.
+Uses float32 instead of float16 for model inference. Auto-enabled for transformer models (`hat`, `nomos8kdat`, `atdjpg`, `nomos8kschat`) which overflow float16. Not needed for SPAN or RealPLKSR models — they run correctly in float16. For RRDB models the quality difference is marginal. Uses roughly 2x the VRAM — the auto tile probe accounts for this.
 
 ### --sharpen
 
