@@ -2,7 +2,7 @@
 
 ##############################################################################
 # AI Video Upscaler — spandrel + basicsr edition
-# Single-frame models: nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat, atdjpg
+# Single-frame models: nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat, atdjpg, nomos8kschat
 # Temporal models:     basicvsr, realbasicvsr  (multi-frame, requires basicsr)
 # Optimised for live-action, compressed/noisy, artifact-heavy sources
 # Requires: FFmpeg, Python 3, spandrel, CUDA GPU
@@ -50,6 +50,7 @@ declare -A MODEL_FILES=(
     [realesrgan]="RealESRGAN_x4plus.pth"
     [hat]="HAT-L_SRx4_ImageNet-pretrain.pth"
     [atdjpg]="4xNomos8k_atd_jpg.pth"
+    [nomos8kschat]="4xNomos8kSCHAT-L.pth"
 )
 
 # ── Temporal model registry (basicsr) — all 4x ───────────────────────────────
@@ -83,9 +84,10 @@ Required:
 
 Model selection (-m / --model):
   ── Single-frame models (spandrel) ──────────────────────────────────────────
-  nomos8k     Best all-round for compressed live-action — fast (~4s/frame)  ← default
-  atdjpg      ATD transformer — best for heavily compressed/degraded sources (JPEG q40+)
-  nomos8kdat  DAT transformer — highest single-frame quality, ~6× slower (~22s/frame)
+  nomos8k       Best all-round for compressed live-action — fast (~4s/frame)  ← default
+  atdjpg        ATD transformer — best for heavily compressed/degraded sources (JPEG q40+)
+  nomos8kschat  HAT-L fine-tuned on Nomos8k — HAT quality on compressed/real-world sources (slow)
+  nomos8kdat    DAT transformer — highest single-frame quality, ~6× slower (~22s/frame)
   lsdir       Sharp detail, handles real-world degradations
   ultrasharp  Maximum sharpness (better on cleaner sources)
   realesrgan  Real-ESRGAN x4plus (legacy fallback)
@@ -170,7 +172,10 @@ Model downloads (place .pth files in $MODEL_DIR):
   lsdir        github.com/Phhofm/models                  → 4xLSDIR.pth
   ultrasharp   huggingface.co/Kim2091/UltraSharp          → 4x-UltraSharp.pth
   realesrgan   github.com/xinntao/Real-ESRGAN             → RealESRGAN_x4plus.pth
-  atdjpg       github.com/Phhofm/models                  → 4xNomos8k_atd_jpg.pth
+  atdjpg        github.com/Phhofm/models                  → 4xNomos8k_atd_jpg.pth
+  nomos8kschat  Google Drive (Phhofm)                     → 4xNomos8kSCHAT-L.pth
+                wget -O ~/ai-upscale/models/4xNomos8kSCHAT-L.pth \
+                "https://drive.usercontent.google.com/download?id=1gh7HDKzf9aZw-rA8WYQy1ZZ8D0MAIHxR&export=download&confirm=t"
   hat          github.com/XPixelGroup/HAT/releases        → HAT-L_SRx4_ImageNet-pretrain.pth
                (requires: pip install spandrel-extra-arches)
   basicvsr     openmmlab CDN                              → BasicVSR_PlusPlus_REDS4.pth
@@ -1499,28 +1504,30 @@ interactive_setup() {
     echo ""
     echo -e "  ${GREEN}Single-frame models${NC} (process each frame independently)"
     echo "  1) nomos8k      — Best all-rounder for compressed video [default]"
-    echo "  2) atdjpg       — Best for heavily compressed/degraded sources (JPEG, DVD rips)"
-    echo "  3) ultrasharp   — Maximum sharpness on clean sources (Blu-ray, high-quality)"
-    echo "  4) lsdir        — Sharp detail on real-world degraded content"
-    echo "  5) hat          — Highest fidelity transformer model, clean sources only (slow)"
-    echo "  6) nomos8kdat   — DAT transformer, very slow, short clips only"
-    echo "  7) realesrgan   — Legacy fallback"
+    echo "  2) atdjpg        — Best for heavily compressed/degraded sources (JPEG, DVD rips)"
+    echo "  3) nomos8kschat  — HAT-L on Nomos8k — HAT quality on real-world/compressed sources (slow)"
+    echo "  4) ultrasharp    — Maximum sharpness on clean sources (Blu-ray, high-quality)"
+    echo "  5) lsdir         — Sharp detail on real-world degraded content"
+    echo "  6) hat           — Highest fidelity transformer model, clean sources only (slow)"
+    echo "  7) nomos8kdat    — DAT transformer, very slow, short clips only"
+    echo "  8) realesrgan    — Legacy fallback"
     echo ""
     echo -e "  ${GREEN}Temporal models${NC} (process multiple frames — better consistency, much faster)"
-    echo "  8) basicvsr     — Best for long content (TV/movies), degraded or compressed sources"
+    echo "  9) basicvsr      — Best for long content (TV/movies), degraded or compressed sources"
     echo ""
     while true; do
-        read -rp "Choose [1-8, default=1]: " model_choice
+        read -rp "Choose [1-9, default=1]: " model_choice
         local selected_key=""
         case "${model_choice:-1}" in
-            1) selected_key="nomos8k"    ;;
-            2) selected_key="atdjpg"     ;;
-            3) selected_key="ultrasharp" ;;
-            4) selected_key="lsdir"      ;;
-            5) selected_key="hat"        ;;
-            6) selected_key="nomos8kdat" ;;
-            7) selected_key="realesrgan" ;;
-            8) selected_key="basicvsr"   ;;
+            1) selected_key="nomos8k"       ;;
+            2) selected_key="atdjpg"        ;;
+            3) selected_key="nomos8kschat"  ;;
+            4) selected_key="ultrasharp"    ;;
+            5) selected_key="lsdir"         ;;
+            6) selected_key="hat"           ;;
+            7) selected_key="nomos8kdat"    ;;
+            8) selected_key="realesrgan"    ;;
+            9) selected_key="basicvsr"      ;;
             *) echo "  Invalid choice, try again."; continue ;;
         esac
         # Validate model file exists
@@ -1667,7 +1674,7 @@ if [[ "$USE_AI" == true ]]; then
 
     # Transformer models overflow float16 — auto-enable full precision
     case "$MODEL_KEY" in
-    hat|nomos8kdat|atdjpg)
+    hat|nomos8kdat|atdjpg|nomos8kschat)
         if [[ "$FULL_PRECISION" == false ]]; then
             FULL_PRECISION=true
             print_info "Auto-enabling --full-precision for $MODEL_KEY (transformer models overflow float16)"
