@@ -52,7 +52,8 @@ Process one frame at a time. No additional dependencies beyond the base install.
 | Key | Filename | Best for | Speed (4060 Ti 16GB) |
 |-----|----------|----------|----------------------|
 | `nomos8k` | `4xNomos8kSC.pth` | Compressed live-action — **default** | ~4 s/frame @ 480p |
-| `lsdir` | `4xLSDIR.pth` | Sharp detail, real-world degradations | ~4 s/frame @ 480p |
+| `lsdirplus` | `4xLSDIRplus.pth` | LSDIR dataset + real degradation — sharp detail on degraded sources | ~4 s/frame @ 480p |
+| `lsdir` | `4xLSDIR.pth` | LSDIR dataset — sharp detail on clean sources | ~4 s/frame @ 480p |
 | `ultrasharp` | `4x-UltraSharp.pth` | Maximum sharpness on clean sources | ~4 s/frame @ 480p |
 | `realesrgan` | `RealESRGAN_x4plus.pth` | Legacy fallback | ~4 s/frame @ 480p |
 
@@ -101,6 +102,10 @@ wget -O 4xNomos2_realplksr_dysample.pth \
 # nomos8k (default) — 64 MB
 wget -O 4xNomos8kSC.pth \
   "https://github.com/Phhofm/models/releases/download/4xNomos8kSC/4xNomos8kSC.pth"
+
+# lsdirplus — 64 MB (LSDIR + real degradation)
+wget -O 4xLSDIRplus.pth \
+  "https://github.com/Phhofm/models/raw/main/4xLSDIRplus/4xLSDIRplus.pth"
 
 # ultrasharp — 64 MB
 wget -O 4x-UltraSharp.pth \
@@ -225,7 +230,7 @@ Required:
 Model:
   -m, --model TYPE          SPAN: spanmedium (fast default), spanweak, spanstrong
                             RealPLKSR: webphoto, nomos2plksr
-                            RRDB: nomos8k (default), lsdir, ultrasharp, realesrgan
+                            RRDB: nomos8k (default), lsdirplus, lsdir, ultrasharp, realesrgan
                             Transformer: atdjpg, nomos8kschat, hat, nomos8kdat
                             Temporal: basicvsr
 
@@ -294,8 +299,9 @@ All models are 4x. Selection guide:
 **RRDB (~4 s/frame) — standard single-frame:**
 
 - **nomos8k** — RRDB-based, trained on real-world degradations. Fast and reliable. Best all-rounder for compressed video. **Default.**
+- **lsdirplus** — RRDB trained on the large LSDIR dataset (85K images) with real-world degradation (compression + noise + blur). Better than `lsdir` for degraded sources — same speed.
+- **lsdir** — RRDB trained on the large LSDIR dataset, clean/bicubic training. Best for clean sources where fine detail preservation is the priority.
 - **ultrasharp** — Maximum perceived sharpness on clean sources. Can over-sharpen noisy inputs.
-- **lsdir** — Sharp edges and fine detail on real-world degraded content.
 - **realesrgan** — The original RealESRGAN x4plus. Kept as a legacy fallback.
 
 **Transformer (20–60 s/frame) — short clips only:**

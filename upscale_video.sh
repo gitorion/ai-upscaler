@@ -3,7 +3,7 @@
 ##############################################################################
 # AI Video Upscaler — spandrel + basicsr edition
 # Single-frame models: nomos8k (default), nomos8kdat, lsdir, ultrasharp, realesrgan, hat, atdjpg, nomos8kschat,
-#                      spanweak, spanmedium, spanstrong, webphoto, nomos2plksr
+#                      spanweak, spanmedium, spanstrong, webphoto, nomos2plksr, lsdirplus
 # Temporal models:     basicvsr, realbasicvsr  (multi-frame, requires basicsr)
 # Optimised for live-action, compressed/noisy, artifact-heavy sources
 # Requires: FFmpeg, Python 3, spandrel, CUDA GPU
@@ -57,6 +57,7 @@ declare -A MODEL_FILES=(
     [spanstrong]="4xNomos8k_span_otf_strong.pth"
     [webphoto]="4xNomosWebPhoto_RealPLKSR.pth"
     [nomos2plksr]="4xNomos2_realplksr_dysample.pth"
+    [lsdirplus]="4xLSDIRplus.pth"
 )
 
 # ── Temporal model registry (basicsr) — all 4x ───────────────────────────────
@@ -101,7 +102,8 @@ Model selection (-m / --model):
 
   RRDB (~4 s/frame — standard):
   nomos8k       Best all-round for compressed live-action                     ← default
-  lsdir         Sharp detail, handles real-world degradations
+  lsdirplus     LSDIR dataset + real degradation — sharp detail on degraded sources
+  lsdir         Sharp detail (clean sources)
   ultrasharp    Maximum sharpness (better on cleaner sources)
   realesrgan    Real-ESRGAN x4plus (legacy fallback)
 
@@ -187,6 +189,7 @@ Examples:
 Model downloads (place .pth files in $MODEL_DIR):
   See README for full wget commands. Quick reference:
   nomos8k      github.com/Phhofm/models                  → 4xNomos8kSC.pth
+  lsdirplus    github.com/Phhofm/models                  → 4xLSDIRplus.pth
   spanmedium   Google Drive (helaman)                     → 4xNomos8k_span_otf_medium.pth
   spanweak     Google Drive (helaman)                     → 4xNomos8k_span_otf_weak.pth
   spanstrong   Google Drive (helaman)                     → 4xNomos8k_span_otf_strong.pth
@@ -1537,21 +1540,22 @@ interactive_setup() {
     echo ""
     echo -e "  ${YELLOW}RRDB — standard (~4 s/frame):${NC}"
     echo "   6) nomos8k      — Best all-rounder for compressed live-action [default]"
-    echo "   7) lsdir        — Sharp detail on real-world degraded content"
-    echo "   8) ultrasharp   — Maximum sharpness on clean sources (Blu-ray)"
-    echo "   9) realesrgan   — Legacy fallback"
+    echo "   7) lsdirplus    — LSDIR dataset + real degradation, sharp detail on degraded sources"
+    echo "   8) lsdir        — LSDIR dataset, sharp detail on clean sources"
+    echo "   9) ultrasharp   — Maximum sharpness on clean sources (Blu-ray)"
+    echo "  10) realesrgan   — Legacy fallback"
     echo ""
     echo -e "  ${YELLOW}Transformer — slow (20-60 s/frame, short clips only):${NC}"
-    echo "  10) atdjpg       — Best for heavily JPEG-compressed/degraded sources"
-    echo "  11) nomos8kschat — HAT-L on Nomos8k, real-world/compressed sources"
-    echo "  12) hat          — Highest fidelity, clean sources only"
-    echo "  13) nomos8kdat   — DAT transformer, highest quality"
+    echo "  11) atdjpg       — Best for heavily JPEG-compressed/degraded sources"
+    echo "  12) nomos8kschat — HAT-L on Nomos8k, real-world/compressed sources"
+    echo "  13) hat          — Highest fidelity, clean sources only"
+    echo "  14) nomos8kdat   — DAT transformer, highest quality"
     echo ""
     echo -e "  ${GREEN}Temporal models${NC} (multi-frame — best consistency, much faster for long content)"
-    echo "  14) basicvsr     — Best for TV/movies, degraded or compressed sources"
+    echo "  15) basicvsr     — Best for TV/movies, degraded or compressed sources"
     echo ""
     while true; do
-        read -rp "Choose [1-14, default=1]: " model_choice
+        read -rp "Choose [1-15, default=1]: " model_choice
         local selected_key=""
         case "${model_choice:-1}" in
             1)  selected_key="spanmedium"   ;;
@@ -1560,14 +1564,15 @@ interactive_setup() {
             4)  selected_key="webphoto"     ;;
             5)  selected_key="nomos2plksr"  ;;
             6)  selected_key="nomos8k"      ;;
-            7)  selected_key="lsdir"        ;;
-            8)  selected_key="ultrasharp"   ;;
-            9)  selected_key="realesrgan"   ;;
-            10) selected_key="atdjpg"       ;;
-            11) selected_key="nomos8kschat" ;;
-            12) selected_key="hat"          ;;
-            13) selected_key="nomos8kdat"   ;;
-            14) selected_key="basicvsr"     ;;
+            7)  selected_key="lsdirplus"    ;;
+            8)  selected_key="lsdir"        ;;
+            9)  selected_key="ultrasharp"   ;;
+            10) selected_key="realesrgan"   ;;
+            11) selected_key="atdjpg"       ;;
+            12) selected_key="nomos8kschat" ;;
+            13) selected_key="hat"          ;;
+            14) selected_key="nomos8kdat"   ;;
+            15) selected_key="basicvsr"     ;;
             *) echo "  Invalid choice, try again."; continue ;;
         esac
         # Validate model file exists
