@@ -19,10 +19,12 @@ source "$SELF_DIR/_env.sh"
 # flag with `python "$CLI" -h` — newer builds use --dit_model, older --model.
 MODEL_FILE="seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 MODEL_FLAG="--dit_model"     # change to "--model" if -h says so
-BATCH_SIZE=5                 # 4n+1 (1,5,9,13...). Higher = better temporal consistency + more VRAM
+BATCH_SIZE=13                # 4n+1 (1,5,9,13,17,33...). Higher = better temporal consistency
+                             # AND faster, but more VRAM. Ideally matches shot length. On 16GB
+                             # try 13→17→33; drop toward 5/1 if you OOM. 5 looks needlessly flickery.
 BLOCKS_TO_SWAP=16            # raise to 24–32 if OOM; lower for speed
 COLOR_CORRECTION="lab"       # lab | wavelet | adain | none
-TEMPORAL_OVERLAP=2           # frames blended between batches — smooths seams
+TEMPORAL_OVERLAP=3           # frames blended between batches — smooths seams (examples use 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 if [[ $# -lt 1 ]]; then
