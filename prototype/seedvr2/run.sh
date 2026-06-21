@@ -25,6 +25,8 @@ BATCH_SIZE=13                # 4n+1 (1,5,9,13,17,33...). Higher = better tempora
 BLOCKS_TO_SWAP=16            # raise to 24–32 if OOM; lower for speed
 COLOR_CORRECTION="lab"       # lab | wavelet | adain | none
 TEMPORAL_OVERLAP=3           # frames blended between batches — smooths seams (examples use 3)
+VAE_TILE_SIZE=512            # VAE encode/decode tile size in px. 1024 barely tiles 1080p and
+                             # OOMs in decode on 16GB; 512 cuts peak VRAM. Drop to 384/256 if needed.
 # ─────────────────────────────────────────────────────────────────────────────
 
 if [[ $# -lt 1 ]]; then
@@ -62,8 +64,11 @@ args=(
     --color_correction "$COLOR_CORRECTION"
     --blocks_to_swap "$BLOCKS_TO_SWAP"
     --dit_offload_device cpu
+    --vae_offload_device cpu     # free the VAE from VRAM between phases (helps decode headroom)
     --vae_encode_tiled
+    --vae_encode_tile_size "$VAE_TILE_SIZE"
     --vae_decode_tiled
+    --vae_decode_tile_size "$VAE_TILE_SIZE"
 )
 
 info "Command: python $CLI ${args[*]}"
