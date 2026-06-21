@@ -25,14 +25,16 @@ mkdir -p "$(dirname "$OUT")"
 LEFT_LABEL="${LEFT_LABEL:-$(basename "$LEFT")}"
 RIGHT_LABEL="${RIGHT_LABEL:-$(basename "$RIGHT")}"
 
-# Scale both to 1080 height, label each, hstack. drawtext needs a font; if
-# fontconfig has no default the labels just won't render (video still stacks).
+# Scale both to 1080 height HONORING each input's display aspect ratio (w = 1080*dar),
+# so an anamorphic source (e.g. the original SD clip) is shown in its true shape rather
+# than squished — fair to compare against the already-corrected SeedVR2 output. drawtext
+# needs a font; if fontconfig has no default the labels just won't render (video stacks).
 info "Stacking: [$LEFT_LABEL] | [$RIGHT_LABEL] → $OUT"
 ffmpeg -y -loglevel error \
     -i "$LEFT" -i "$RIGHT" \
     -filter_complex "\
-        [0:v]scale=-2:1080,setsar=1,drawtext=text='${LEFT_LABEL}':x=10:y=10:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5[l];\
-        [1:v]scale=-2:1080,setsar=1,drawtext=text='${RIGHT_LABEL}':x=10:y=10:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5[r];\
+        [0:v]scale=w=trunc(1080*dar/2)*2:h=1080:flags=lanczos,setsar=1,drawtext=text='${LEFT_LABEL}':x=10:y=10:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5[l];\
+        [1:v]scale=w=trunc(1080*dar/2)*2:h=1080:flags=lanczos,setsar=1,drawtext=text='${RIGHT_LABEL}':x=10:y=10:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5[r];\
         [l][r]hstack=inputs=2" \
     -c:v libx265 -crf 18 -preset medium -pix_fmt yuv420p10le \
     -an "$OUT" \
