@@ -51,6 +51,49 @@ mkdir -p "$OUT_DIR"
 base=$(basename "$INPUT"); base="${base%.*}"
 OUTPUT="$OUT_DIR/${base}_seedvr2.mkv"          # final (with audio + optional denoise)
 RAW_OUTPUT="$OUT_DIR/${base}_seedvr2.raw.mkv"  # SeedVR2 video-only intermediate
+DEANAMORPH="$OUT_DIR/${base}_square.mkv"        # de-anamorphized feed for SeedVR2 (if needed)
+
+# ── Pre-process: de-anamorphize so SeedVR2 works at correct geometry ──────────────
+# SeedVR2 has no aspect awareness — it upscales raw stored pixels. For anamorphic
+# sources (e.g. PAL 720x576 shown 4:3) that yields a squished result. We fix the
+# SHAPE BEFORE the AI so it reconstructs detail at correct proportions, instead of
+# stretching (and softening) afterwards. Square-pixel sources pass through untouched.
+# Lossless x264 (-qp 0) keeps the only pre-AI step from adding compression artifacts.
+UPSCALE_INPUT="$INPUT"
+
+read -r src_w src_h < <(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+          -of csv=p=0:nk=1 "$INPUT" 2>/dev/null | head -1 | tr ',' ' ')
+src_dar=$(ffprobe -v error -select_streams v:0 -show_entries stream=display_aspect_ratio \
+          -of default=noprint_wrappers=1:nokey=1 "$INPUT" 2>/dev/null | head -1)
+src_sar=$(ffprobe -v error -select_streams v:0 -show_entries stream=sample_aspect_ratio \
+          -of default=noprint_wrappers=1:nokey=1 "$INPUT" 2>/dev/null | head -1)
+
+# Display width:height ratio (dar_w:dar_h): DAR → SAR×storage → storage pixels.
+if [[ "$src_dar" =~ ^[0-9]+:[0-9]+$ && "$src_dar" != "0:1" ]]; then
+    dar_w=${src_dar%:*}; dar_h=${src_dar#*:}
+elif [[ "$src_sar" =~ ^[0-9]+:[0-9]+$ && "$src_sar" != "0:1" && -n "$src_w" && -n "$src_h" ]]; then
+    sar_w=${src_sar%:*}; sar_h=${src_sar#*:}; dar_w=$(( src_w * sar_w )); dar_h=$(( src_h * sar_h ))
+else
+    dar_w=${src_w:-0}; dar_h=${src_h:-0}
+fi
+
+# Square-pixel width at native height. If it differs from stored width → anamorphic.
+if [[ "${src_h:-0}" -gt 0 && "${dar_h:-0}" -gt 0 ]]; then
+    square_w=$(awk -v h="$src_h" -v n="$dar_w" -v d="$dar_h" \
+               'BEGIN{w=int(h*n/d + 0.5); if(w%2)w--; print w}')
+    if [[ "$square_w" -gt 0 && "$square_w" != "$src_w" ]]; then
+        info "De-anamorphize: ${src_w}x${src_h} (SAR ${src_sar:-?}) → ${square_w}x${src_h} square px (display ${dar_w}:${dar_h})"
+        if ffmpeg -y -loglevel error -i "$INPUT" \
+               -vf "scale=${square_w}:${src_h}:flags=lanczos,setsar=1" \
+               -an -sn -c:v libx264 -qp 0 -pix_fmt yuv420p "$DEANAMORPH"; then
+            UPSCALE_INPUT="$DEANAMORPH"
+        else
+            warn "De-anamorphize failed — feeding original; post-process will correct AR instead."
+        fi
+    else
+        info "Source is square-pixel (${src_w}x${src_h}) — no de-anamorphize needed"
+    fi
+fi
 
 # shellcheck disable=SC1091
 source "$SEEDVR2_VENV/bin/activate"
@@ -61,7 +104,7 @@ warn "First run downloads weights to $MODEL_DIR (~several GB) — be patient."
 
 # Args as an array so flags are easy to add/remove.
 args=(
-    "$INPUT"
+    "$UPSCALE_INPUT"             # de-anamorphized feed when source is anamorphic, else original
     --output "$RAW_OUTPUT"       # video-only; audio is remuxed in the post-process step
     --output_format mp4          # stream encoded by --video_backend; .mkv name is fine
     --video_backend ffmpeg
@@ -90,19 +133,48 @@ elapsed=$SECONDS
 
 [[ -f "$RAW_OUTPUT" ]] || { err "SeedVR2 produced no output ($RAW_OUTPUT) — see errors above."; exit 1; }
 
-# ── Post-process: remux original audio (+ subs) and optional minimal denoise ──────
-# SeedVR2 outputs video only. We pull audio/subs from the ORIGINAL input. Frame count
-# and fps are preserved by SeedVR2, so a straight remux stays in sync. The '?' on the
-# audio/subtitle maps makes them optional (no failure if the source has none).
+# ── Post-process: AR safety-net + optional denoise + remux audio ──────────────────
+# Aspect is normally fixed up front (de-anamorphize). This stays as a SAFETY NET: if
+# the pre-process was skipped/failed, we still correct the shape here using the source
+# DAR (dar_w:dar_h, already resolved above). Normally raw == target, so this no-ops and
+# the video is stream-copied. We also remux audio/subs from the ORIGINAL input (frame
+# count + fps are preserved, so it stays in sync; '?' makes those maps optional).
+
 has_audio=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_type \
             -of default=noprint_wrappers=1:nokey=1 "$INPUT" 2>/dev/null || true)
 
-if [[ -n "$DENOISE_VF" ]]; then
-    info "Post-process: denoise ($DENOISE_VF) + remux audio → re-encoding HEVC 10-bit"
-    video_opts=(-vf "$DENOISE_VF" -c:v libx265 -crf 16 -preset medium
+# SeedVR2 output dimensions (height is the short edge it produced).
+read -r raw_w raw_h < <(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+          -of csv=p=0:nk=1 "$RAW_OUTPUT" 2>/dev/null | head -1 | tr ',' ' ')
+
+# Correct width for the height SeedVR2 produced (even). Guard against bad probe.
+target_h=${raw_h:-0}
+if [[ "$target_h" -gt 0 && "$dar_h" -gt 0 ]]; then
+    target_w=$(awk -v h="$target_h" -v n="$dar_w" -v d="$dar_h" \
+               'BEGIN{w=int(h*n/d + 0.5); if(w%2)w--; print w}')
+else
+    target_w=${raw_w:-0}
+fi
+
+# Build the video filter chain: scale (only if AR correction is needed) + denoise.
+vf_parts=()
+need_reencode=false
+if [[ "$target_w" -gt 0 && ( "$target_w" != "$raw_w" || "$target_h" != "$raw_h" ) ]]; then
+    vf_parts+=("scale=${target_w}:${target_h}:flags=lanczos")
+    need_reencode=true
+    info "Aspect: ${raw_w}x${raw_h} → ${target_w}x${target_h} (display AR ${dar_w}:${dar_h})"
+else
+    info "Aspect: ${raw_w}x${raw_h} already correct — no rescale"
+fi
+[[ -n "$DENOISE_VF" ]] && { vf_parts+=("$DENOISE_VF"); need_reencode=true; }
+
+if [[ "$need_reencode" == true ]]; then
+    vf_chain=$(IFS=,; echo "${vf_parts[*]}")
+    info "Post-process: re-encode HEVC 10-bit (vf: $vf_chain) + remux audio"
+    video_opts=(-vf "$vf_chain" -c:v libx265 -crf 16 -preset medium
                 -pix_fmt yuv420p10le -x265-params "aq-mode=3")
 else
-    info "Post-process: remux audio (no denoise) → stream-copying video (lossless)"
+    info "Post-process: remux audio only → stream-copying video (lossless)"
     video_opts=(-c:v copy)
 fi
 
@@ -112,6 +184,8 @@ ffmpeg -y -loglevel error -i "$RAW_OUTPUT" -i "$INPUT" \
     "$OUTPUT" \
     && rm -f "$RAW_OUTPUT" \
     || { err "Post-process failed — raw video-only result kept at $RAW_OUTPUT"; exit 1; }
+
+rm -f "$DEANAMORPH"   # drop the de-anamorphized intermediate (no-op if unused)
 
 [[ -n "$has_audio" ]] && ok "Audio retained." || warn "Source had no audio stream — output is silent."
 
