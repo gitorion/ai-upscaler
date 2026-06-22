@@ -184,6 +184,10 @@ Once installed, it's a first-class model key — the main script handles audio, 
 
 Aspect ratio is corrected **up front** (anamorphic sources are de-anamorphized to square pixels before SeedVR2 sees them, so detail is reconstructed at correct geometry rather than stretched afterwards). The final step then **stream-copies** SeedVR2's video and only muxes on audio/subtitles — no second encode, no generation loss. (Passing `--sharpen` is the one exception: a filter forces a re-encode.)
 
+**Long files (auto-segmentation + resume):** A full episode is ~4–5 days of compute, and the SeedVR2 CLI has no mid-run checkpoint — a single crash or reboot would lose everything. So files longer than `SEEDVR2_SEGMENT_SECONDS` (default 5 min) are automatically split into segments, each upscaled independently and written atomically, then losslessly concatenated with audio/subs muxed back on. If a run is interrupted, re-run the **exact same command with `--resume`** and it skips every already-finished segment and picks up where it left off. At completion the segment intermediates are cleaned up and you get a single output file. So a 45-minute source *is* practical — it just takes days, survives interruptions, and you can stop/resume freely. Set `SEEDVR2_SEGMENT_SECONDS=0` to force single-shot.
+
+**Disk for a long run** (≈45 min, 720p→1080p): budget **~60 GB free** with the default prefilter, or **~20 GB** with `--prefilter none`. The big cost is the lossless FFV1 prefilter intermediate (~20 GB) plus the input segments being lossless copies of it (another ~20 GB) — `--prefilter none` removes the FFV1 entirely (and SeedVR2's diffusion handles degradation well on its own), cutting disk ~3×. Rule of thumb at 1080p: output side ≈ 2 MB/s × duration with ~3× headroom; FFV1 prefilter ≈ 7.5 MB/s × duration with ~2×; multiply output-side figures by ~4 for 4K. Check with `df -h ~/ai-upscale` before starting.
+
 **16GB notes:** SeedVR2 is tuned in `upscale_video.sh` (the `SEEDVR2_*` variables) for a 4060 Ti 16GB — 3B FP8, block-swap, VAE tiling, and **chunked streaming** (`SEEDVR2_CHUNK`). The streaming is important: loading a whole clip holds the entire output in system RAM and will OOM-kill on long clips, so the default processes in bounded chunks. **32 GB system RAM recommended** (16 GB is marginal because the CPU-offload that frees VRAM lands in RAM).
 
 **Speed (lossless only):** `torch.compile` is on by default (`SEEDVR2_COMPILE`) — it fuses GPU kernels via Triton for a 20–40% speedup without changing the output. Attention defaults to `auto` (`SEEDVR2_ATTENTION`): if `flash-attn` is installed in the SeedVR2 venv it uses `flash_attn_2` (lossless, faster) automatically, otherwise it falls back to `sdpa` — so the only step to get the speedup is `pip install flash-attn`, no flag to flip. SageAttention is deliberately **not** used — it quantizes attention (an approximation), which conflicts with the quality-first goal.
@@ -196,7 +200,7 @@ Aspect ratio is corrected **up front** (anamorphic sources are de-anamorphized t
 | nomos8k / ultrasharp / lsdir | ~100 hrs | ~250 hrs |
 | hat | ~200 hrs | ~500 hrs |
 | nomos8kdat | ~600 hrs | ~1600 hrs |
-| seedvr2 | impractical at this length — short clips only (~4–7 s/frame) | — |
+| seedvr2 | ~4–5 days (~4–7 s/frame; auto-segmented + resumable) | longer |
 
 BasicVSR++ is 5-15x faster than single-frame models and is the recommended choice for any content longer than a few minutes. For short clips where maximum quality matters most, `seedvr2` is the top tier.
 
@@ -347,7 +351,7 @@ All models are 4x. Selection guide:
 
 **Diffusion VSR — highest quality on low-res sources, short clips only:**
 
-- **seedvr2** — One-step diffusion VSR. *Reconstructs* plausible detail rather than only sharpening, making it the biggest quality jump available on genuinely low-res/compressed live-action. Slow (~4–7 s/frame on 16GB) and generative (can fabricate fine detail), so best reserved for short, important clips where quality matters most. Separate install (`prototype/seedvr2/setup.sh`) — see the [Diffusion VSR (SeedVR2)](#diffusion-vsr-seedvr2) section above for the full rundown and 16GB notes.
+- **seedvr2** — One-step diffusion VSR. *Reconstructs* plausible detail rather than only sharpening, making it the biggest quality jump available on genuinely low-res/compressed live-action. Slow (~4–7 s/frame on 16GB) and generative (can fabricate fine detail). Long files are auto-segmented and resumable (`--resume`), so full episodes are practical given the time — but for length BasicVSR++ is far faster. Separate install (`prototype/seedvr2/setup.sh`) — see the [Diffusion VSR (SeedVR2)](#diffusion-vsr-seedvr2) section above for the full rundown and 16GB notes.
 
 ### --temporal-window
 

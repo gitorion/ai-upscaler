@@ -69,6 +69,12 @@ SEEDVR2_COMPILE=true        # set false if compile errors out or its first-batch
 # needs nothing). So to get the speedup you ONLY `pip install flash-attn` — no flag to flip.
 # Pin to 'sdpa' or 'flash_attn_2' to override. Do NOT use sageattn_* — it QUANTIZES (lossy).
 SEEDVR2_ATTENTION="auto"
+# Auto-segmentation for long files. A 45-min clip is ~4-5 DAYS of compute; running it as one
+# process means a single crash/reboot loses everything (the CLI has no mid-run resume). So files
+# longer than this are split into segments, each upscaled independently and atomically, then
+# losslessly concatenated. --resume skips already-finished segments. Larger = fewer concat seams
+# but coarser checkpoints (lose more on a crash); smaller = finer checkpoints but more seams.
+SEEDVR2_SEGMENT_SECONDS=300   # 5 min. Set 0 to disable segmentation (single-shot regardless of length).
 
 # ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
 declare -A MODEL_FILES=(
@@ -152,8 +158,9 @@ Model selection (-m / --model):
   ── Diffusion VSR — highest quality on low-res/degraded sources ────────────
   seedvr2     SeedVR2 — one-step diffusion. Reconstructs (not just sharpens) detail;
               the biggest quality jump for genuinely low-res/compressed live-action.
-              SLOW (~4-7 s/frame on 16GB) — best for short/important clips, not full
-              episodes. Generative: can fabricate fine detail (watch fidelity).
+              SLOW (~4-7 s/frame on 16GB). Long files are auto-segmented and fully
+              resumable (--resume), so full episodes are practical if you have the time.
+              Generative: can fabricate fine detail (watch fidelity).
               Separate install: prototype/seedvr2/setup.sh (own venv, weights auto-DL).
 
 Pre-processing (applied before AI upscaling to clean degraded sources):
@@ -193,6 +200,7 @@ Temporal model options:
 
 Workflow:
   --resume                  Resume interrupted run — skip already-completed frames
+                            (for seedvr2: skips already-finished segments of a long file)
   --keep-temp               Keep temporary files after completion
   -h, --help                Show this help
 
@@ -1421,6 +1429,46 @@ upscale_video() {
     encode_output "$output_file"
 }
 
+# Core SeedVR2 inference: one input video → one upscaled video. Used for both the single-shot
+# and per-segment paths. Resolves the lossless speed options and runs the standalone CLI.
+seedvr2_infer() {
+    local in_video="$1" out_video="$2"
+
+    # Lossless speedups (no quality change): torch.compile + chosen attention backend.
+    # 'auto' picks flash_attn_2 when flash-attn is importable in the SeedVR2 venv, else sdpa.
+    local attn="$SEEDVR2_ATTENTION"
+    if [[ "$attn" == "auto" ]]; then
+        if "$SEEDVR2_VENV/bin/python3" -c "import flash_attn" &>/dev/null; then
+            attn="flash_attn_2"
+        else
+            attn="sdpa"
+        fi
+    fi
+    local -a speed_opts=(--attention_mode "$attn")
+    [[ "$SEEDVR2_COMPILE" == true ]] && speed_opts+=(--compile_dit --compile_vae)
+
+    mkdir -p "$SEEDVR2_MODEL_DIR"
+    "$SEEDVR2_VENV/bin/python3" "$SEEDVR2_CLI" \
+        "$in_video" \
+        --output "$out_video" \
+        --output_format mp4 \
+        --video_backend ffmpeg \
+        --10bit \
+        --model_dir "$SEEDVR2_MODEL_DIR" \
+        --dit_model "$SEEDVR2_MODEL_FILE" \
+        --resolution "$OUTPUT_HEIGHT" \
+        --batch_size "$SEEDVR2_BATCH" \
+        --chunk_size "$SEEDVR2_CHUNK" \
+        --temporal_overlap "$SEEDVR2_TEMPORAL_OVERLAP" \
+        --color_correction lab \
+        --blocks_to_swap "$SEEDVR2_BLOCKS_SWAP" \
+        --dit_offload_device cpu \
+        --vae_offload_device cpu \
+        --vae_encode_tiled --vae_encode_tile_size "$SEEDVR2_VAE_ENC_TILE" \
+        --vae_decode_tiled --vae_decode_tile_size "$SEEDVR2_VAE_DEC_TILE" \
+        "${speed_opts[@]}"
+}
+
 upscale_seedvr2() {
     local output_file="$1"
     local raw_video="$TEMP_DIR/seedvr2_raw.mkv"
@@ -1433,60 +1481,37 @@ upscale_seedvr2() {
     # is the source's display aspect — for square-pixel sources this is a no-op.
     if [[ "$INPUT_SAR" != "1:1" && -n "$INPUT_SAR" && "$INPUT_SAR" != "N/A" ]]; then
         local square="$TEMP_DIR/seedvr2_square.mkv"
-        print_info "SeedVR2: de-anamorphizing source to square pixels (SAR ${INPUT_SAR})"
-        ffmpeg -i "$feed" \
-            -vf "scale=w='trunc(ih*dar/2)*2':h=ih:flags=lanczos,setsar=1" \
-            -an -sn -c:v libx264 -qp 0 -pix_fmt yuv420p \
-            "$square" -y -loglevel error \
-            && feed="$square" \
-            || print_warning "De-anamorphize failed — feeding original; final encode still corrects AR"
+        if [[ "$RESUME" == true && -f "$square" ]]; then
+            print_info "Resume: reusing de-anamorphized source"
+            feed="$square"
+        else
+            print_info "SeedVR2: de-anamorphizing source to square pixels (SAR ${INPUT_SAR})"
+            ffmpeg -i "$feed" \
+                -vf "scale=w='trunc(ih*dar/2)*2':h=ih:flags=lanczos,setsar=1" \
+                -an -sn -c:v libx264 -qp 0 -pix_fmt yuv420p \
+                "$square" -y -loglevel error \
+                && feed="$square" \
+                || print_warning "De-anamorphize failed — feeding original; final encode still corrects AR"
+        fi
     fi
 
-    # SeedVR2's --resolution is the target SHORT edge; for landscape that is the height.
-    local short_edge="$OUTPUT_HEIGHT"
+    print_info "Model: seedvr2 (${SEEDVR2_MODEL_FILE})  |  short-edge: ${OUTPUT_HEIGHT}px  |  batch: ${SEEDVR2_BATCH}  |  chunk: ${SEEDVR2_CHUNK}  |  Prefilter: ${PREFILTER}"
+    print_warning "Diffusion VSR is slow (~4-7 s/frame on 16GB)."
+    print_warning "First run downloads weights (~3.6GB) to ${SEEDVR2_MODEL_DIR}."
 
+    # Long files → segment for resumability (a multi-day single run can't survive any interruption).
+    local dur_int=${DURATION%.*}
+    if [[ "$SEEDVR2_SEGMENT_SECONDS" -gt 0 && "${dur_int:-0}" -gt "$SEEDVR2_SEGMENT_SECONDS" ]]; then
+        seedvr2_segmented "$feed" "$output_file"
+        return
+    fi
+
+    # Single-shot (short files).
     if [[ "$RESUME" == true && -f "$raw_video" ]]; then
         print_info "Resume: reusing existing SeedVR2 output ($raw_video)"
     else
         print_info "Starting SeedVR2 diffusion upscaling..."
-        print_info "Model: seedvr2 (${SEEDVR2_MODEL_FILE})  |  short-edge: ${short_edge}px  |  batch: ${SEEDVR2_BATCH}  |  chunk: ${SEEDVR2_CHUNK}  |  Prefilter: ${PREFILTER}"
-        print_warning "Diffusion VSR is slow (~4-7 s/frame on 16GB) — best for short/important clips."
-        print_warning "First run downloads weights (~3.6GB) to ${SEEDVR2_MODEL_DIR}."
-
-        # Lossless speedups (no quality change): torch.compile + chosen attention backend.
-        # 'auto' picks flash_attn_2 when flash-attn is importable in the SeedVR2 venv, else sdpa.
-        local attn="$SEEDVR2_ATTENTION"
-        if [[ "$attn" == "auto" ]]; then
-            if "$SEEDVR2_VENV/bin/python3" -c "import flash_attn" &>/dev/null; then
-                attn="flash_attn_2"; print_info "SeedVR2: flash-attn detected — using flash_attn_2 (lossless speedup)"
-            else
-                attn="sdpa"
-            fi
-        fi
-        local -a speed_opts=(--attention_mode "$attn")
-        [[ "$SEEDVR2_COMPILE" == true ]] && speed_opts+=(--compile_dit --compile_vae)
-
-        mkdir -p "$SEEDVR2_MODEL_DIR"
-        "$SEEDVR2_VENV/bin/python3" "$SEEDVR2_CLI" \
-            "$feed" \
-            --output "$raw_video" \
-            --output_format mp4 \
-            --video_backend ffmpeg \
-            --10bit \
-            --model_dir "$SEEDVR2_MODEL_DIR" \
-            --dit_model "$SEEDVR2_MODEL_FILE" \
-            --resolution "$short_edge" \
-            --batch_size "$SEEDVR2_BATCH" \
-            --chunk_size "$SEEDVR2_CHUNK" \
-            --temporal_overlap "$SEEDVR2_TEMPORAL_OVERLAP" \
-            --color_correction lab \
-            --blocks_to_swap "$SEEDVR2_BLOCKS_SWAP" \
-            --dit_offload_device cpu \
-            --vae_offload_device cpu \
-            --vae_encode_tiled --vae_encode_tile_size "$SEEDVR2_VAE_ENC_TILE" \
-            --vae_decode_tiled --vae_decode_tile_size "$SEEDVR2_VAE_DEC_TILE" \
-            "${speed_opts[@]}"
-
+        seedvr2_infer "$feed" "$raw_video"
         [[ -f "$raw_video" ]] || { print_error "SeedVR2 produced no output — see errors above."; exit 1; }
     fi
 
@@ -1495,6 +1520,71 @@ upscale_seedvr2() {
     # stream-COPIES SeedVR2's video and just muxes audio/subs — no re-encode, no quality loss
     # (unless --sharpen forces one). Passing the video as $2 selects that path.
     encode_output "$output_file" "$raw_video"
+}
+
+# Auto-segmented SeedVR2 for long files: split → upscale each segment atomically → concat → mux.
+# Each segment's output is written to a .part file and only renamed on success, so an interrupted
+# run never leaves a half-done segment that --resume would wrongly skip.
+seedvr2_segmented() {
+    local feed="$1" output_file="$2"
+    local seg_dir="$TEMP_DIR/seedvr2_segments"
+    local concat_raw="$TEMP_DIR/seedvr2_concat.mkv"
+    mkdir -p "$seg_dir"
+
+    # 1. Split the feed into video-only segments (lossless stream copy; cuts snap to keyframes —
+    #    the prefilter's FFV1 / de-anamorph intermediates are all-intra, so cuts are exact).
+    #    Deterministic boundaries mean --resume re-derives the identical segment set.
+    if [[ "$RESUME" == true && -n "$(ls "$seg_dir"/in_*.mkv 2>/dev/null)" ]]; then
+        print_info "Resume: reusing existing input segments"
+    else
+        rm -f "$seg_dir"/in_*.mkv
+        print_info "Segmenting source into ${SEEDVR2_SEGMENT_SECONDS}s pieces..."
+        ffmpeg -i "$feed" -map 0:v -c copy -f segment \
+            -segment_time "$SEEDVR2_SEGMENT_SECONDS" -reset_timestamps 1 \
+            "$seg_dir/in_%04d.mkv" -y -loglevel error
+    fi
+
+    local -a segs=("$seg_dir"/in_*.mkv)
+    local total=${#segs[@]}
+    [[ -f "${segs[0]}" ]] || { print_error "Segmentation produced no segments"; exit 1; }
+    print_info "SeedVR2: ${total} segments of ~${SEEDVR2_SEGMENT_SECONDS}s each (auto-segmented for resumability)"
+    print_warning "Long SeedVR2 run: expect DAYS of compute (~4-7 s/frame). It is fully resumable —"
+    print_warning "if interrupted, re-run the SAME command with --resume to skip finished segments."
+    print_warning "Keep plenty of free disk for temp segments; --prefilter none avoids a large FFV1 intermediate."
+
+    # 2. Upscale each segment (skip ones already finished on a --resume).
+    local i=0 done_count=0
+    for seg in "${segs[@]}"; do
+        i=$((i + 1))
+        local idx; idx=$(basename "$seg" .mkv); idx=${idx#in_}
+        local out="$seg_dir/out_${idx}.mkv"
+        local part="$seg_dir/part_${idx}.mkv"   # valid .mkv ext (ffmpeg needs it); distinct from out_*
+        if [[ "$RESUME" == true && -f "$out" ]]; then
+            print_info "Segment ${i}/${total}: already done — skipping"
+            done_count=$((done_count + 1))
+            continue
+        fi
+        print_info "Segment ${i}/${total}: upscaling $(basename "$seg")..."
+        seedvr2_infer "$seg" "$part"
+        [[ -f "$part" ]] || { print_error "Segment ${i} produced no output — see errors above."; exit 1; }
+        mv -f "$part" "$out"   # atomic: only a complete segment counts as done
+        done_count=$((done_count + 1))
+    done
+
+    # 3. Concat the upscaled segments losslessly (all share SeedVR2's HEVC params).
+    print_info "Concatenating ${done_count} upscaled segments..."
+    local list="$seg_dir/concat.txt"
+    : > "$list"
+    for seg in "${segs[@]}"; do
+        local idx; idx=$(basename "$seg" .mkv); idx=${idx#in_}
+        printf "file '%s'\n" "$seg_dir/out_${idx}.mkv" >> "$list"
+    done
+    ffmpeg -f concat -safe 0 -i "$list" -c copy "$concat_raw" -y -loglevel error \
+        || { print_error "Concat failed"; exit 1; }
+
+    print_success "Upscaling complete"
+    # Mux audio/subs onto the concatenated video — stream copy, no re-encode.
+    encode_output "$output_file" "$concat_raw"
 }
 
 encode_output() {
@@ -1883,6 +1973,8 @@ if [[ "$RESUME" == false ]]; then
     rm -f  "$TEMP_DIR/subs.mkv"
     rm -f  "$TEMP_DIR/seedvr2_raw.mkv"
     rm -f  "$TEMP_DIR/seedvr2_square.mkv"
+    rm -f  "$TEMP_DIR/seedvr2_concat.mkv"
+    rm -rf "$TEMP_DIR/seedvr2_segments"
 fi
 
 mkdir -p "$TEMP_DIR/frames"
