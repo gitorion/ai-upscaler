@@ -30,6 +30,12 @@ TEMPORAL_OVERLAP=3           # frames blended between batches — smooths seams 
 VAE_ENCODE_TILE_SIZE=1024    # fit comfortably at 1024 — keep it big for speed
 VAE_DECODE_TILE_SIZE=768     # 1024 OOMs, 512 is slow (~15 tiles). 768 is the middle ground.
                              # If 768 OOMs in decode, drop to 640 then 512.
+# Streaming chunk size (frames). Loading a whole clip holds the ENTIRE output + latents
+# in RAM, which scales with length and OOM-kills on long clips (a 57s/1439-frame clip
+# needed >32GB). Chunking keeps RAM flat regardless of length; temporal_overlap blends
+# the seams. 0 = load all (short clips only). 250 is safe on 32GB; raise for fewer seams
+# if RAM allows, lower toward 130 if you still OOM.
+CHUNK_SIZE=250
 
 # Post-process: SeedVR2 drops audio and has no denoise, so we add both in one ffmpeg
 # pass after inference. DENOISE_VF is a minimal grain-reducer applied to the upscaled
@@ -113,6 +119,7 @@ args=(
     "$MODEL_FLAG" "$MODEL_FILE"
     --resolution "$RESOLUTION"
     --batch_size "$BATCH_SIZE"
+    --chunk_size "$CHUNK_SIZE"   # streaming: keeps system-RAM flat vs clip length (avoids OOM-kill)
     --temporal_overlap "$TEMPORAL_OVERLAP"
     --color_correction "$COLOR_CORRECTION"
     --blocks_to_swap "$BLOCKS_TO_SWAP"
