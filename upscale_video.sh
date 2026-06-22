@@ -24,6 +24,14 @@ MODEL_DIR="$SCRIPT_DIR/models"
 TEMP_DIR="$SCRIPT_DIR/temp"
 VENV_DIR="$SCRIPT_DIR/venv"
 
+# SeedVR2 (diffusion VSR) runs in its OWN venv with a different torch build, via the
+# upstream standalone inference_cli.py. Install with prototype/seedvr2/setup.sh.
+SEEDVR2_DIR="$SCRIPT_DIR/seedvr2"
+SEEDVR2_VENV="$SEEDVR2_DIR/venv"
+SEEDVR2_REPO="$SEEDVR2_DIR/repo"
+SEEDVR2_CLI="$SEEDVR2_REPO/inference_cli.py"
+SEEDVR2_MODEL_DIR="$MODEL_DIR/SEEDVR2"
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TILE_SIZE="auto"
 TILE_SIZE_EXPLICIT=false
@@ -39,8 +47,28 @@ FULL_PRECISION=false
 KEEP_TEMP=false
 UPSCALE_SOURCE=""
 IS_TEMPORAL=false
+IS_SEEDVR2=false
 TEMPORAL_WINDOW="auto"
 SPYNET_PATH=""
+
+# ── SeedVR2 settings (tuned for RTX 4060 Ti 16GB) ─────────────────────────────
+# Validated config from the prototype. Edit if your GPU/RAM differs.
+SEEDVR2_MODEL_FILE="seedvr2_ema_3b_fp8_e4m3fn.safetensors"  # 3B FP8 — fits 16GB with swap
+SEEDVR2_BATCH=13            # frames/batch (4n+1); higher = better temporal consistency + more VRAM
+SEEDVR2_BLOCKS_SWAP=16      # transformer blocks offloaded to CPU RAM (VRAM saver)
+SEEDVR2_VAE_ENC_TILE=1024   # VAE encode tile px
+SEEDVR2_VAE_DEC_TILE=768    # VAE decode tile px (1024 OOMs in decode on 16GB; 768 is the sweet spot)
+SEEDVR2_TEMPORAL_OVERLAP=3  # frames blended between batches/chunks — smooths seams
+SEEDVR2_CHUNK=250           # streaming chunk size — keeps system RAM flat vs clip length (REQUIRED
+                            # for long clips; whole-clip load OOM-kills). 0 = load all (short only).
+# Speed optimizations that are LOSSLESS (identical output, just faster) — on by default.
+# torch.compile fuses GPU kernels via Triton (already installed); does not change the math.
+SEEDVR2_COMPILE=true        # set false if compile errors out or its first-batch overhead hurts tiny clips
+# Attention backend. 'auto' = use flash_attn_2 if flash-attn is installed in the SeedVR2 venv
+# (lossless: exact attention, just fused, and faster), else fall back to 'sdpa' (also lossless,
+# needs nothing). So to get the speedup you ONLY `pip install flash-attn` — no flag to flip.
+# Pin to 'sdpa' or 'flash_attn_2' to override. Do NOT use sageattn_* — it QUANTIZES (lossy).
+SEEDVR2_ATTENTION="auto"
 
 # ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
 declare -A MODEL_FILES=(
@@ -121,6 +149,13 @@ Model selection (-m / --model):
   Requires: pip install basicsr  +  spynet_20210409-c6c1bd09.pth in models/
   See --temporal-window to adjust window size.
 
+  ── Diffusion VSR — highest quality on low-res/degraded sources ────────────
+  seedvr2     SeedVR2 — one-step diffusion. Reconstructs (not just sharpens) detail;
+              the biggest quality jump for genuinely low-res/compressed live-action.
+              SLOW (~4-7 s/frame on 16GB) — best for short/important clips, not full
+              episodes. Generative: can fabricate fine detail (watch fidelity).
+              Separate install: prototype/seedvr2/setup.sh (own venv, weights auto-DL).
+
 Pre-processing (applied before AI upscaling to clean degraded sources):
   --prefilter LEVEL         none, light (default), medium, heavy
                               none       No filtering — use for clean/high-quality sources
@@ -180,6 +215,9 @@ Examples:
   # Clean source, highest fidelity single-frame model
   $0 -i bluray_rip.mkv -r 2160p -m hat --prefilter none
 
+  # Diffusion VSR — biggest quality jump on low-res clips (slow; short clips)
+  $0 -i clip.mkv -r 1080p -m seedvr2
+
   # Resume an interrupted run
   $0 -i film.mkv -r 1080p --resume
 
@@ -209,6 +247,9 @@ Model downloads (place .pth files in $MODEL_DIR):
                (requires: pip install basicsr)
   spynet       Required by both temporal models           → spynet_20210409-c6c1bd09.pth
                (downloaded automatically by basicsr on first use)
+  seedvr2      Separate install — own venv + standalone CLI (NOT a .pth in models/)
+               Setup:   <repo>/prototype/seedvr2/setup.sh
+               Weights: auto-downloaded to models/SEEDVR2/ on first run (~3.6GB)
 EOF
     exit 0
 }
@@ -344,6 +385,24 @@ calculate_scale() {
 }
 
 select_model() {
+    # SeedVR2 (diffusion VSR) — separate venv + standalone CLI, not a .pth in MODEL_DIR
+    if [[ "$MODEL_KEY" == "seedvr2" ]]; then
+        IS_SEEDVR2=true
+        IS_TEMPORAL=false
+        if [[ ! -f "$SEEDVR2_CLI" ]]; then
+            print_error "SeedVR2 not installed: $SEEDVR2_CLI not found"
+            print_error "Install it first:  cd <repo>/prototype/seedvr2 && ./setup.sh"
+            exit 1
+        fi
+        if [[ ! -x "$SEEDVR2_VENV/bin/python3" ]]; then
+            print_error "SeedVR2 venv missing: $SEEDVR2_VENV"
+            print_error "Run prototype/seedvr2/setup.sh to create it"
+            exit 1
+        fi
+        print_info "Model: seedvr2  (${SEEDVR2_MODEL_FILE})  [diffusion VSR — separate venv]"
+        return
+    fi
+
     # Check single-frame registry (spandrel)
     if [[ -n "${MODEL_FILES[$MODEL_KEY]+_}" ]]; then
         IS_TEMPORAL=false
@@ -380,6 +439,7 @@ select_model() {
     print_error "Unknown model: $MODEL_KEY"
     print_error "Single-frame (spandrel): ${!MODEL_FILES[*]}"
     print_error "Temporal (basicsr):      ${!TEMPORAL_MODEL_FILES[*]}"
+    print_error "Diffusion VSR:           seedvr2"
     exit 1
 }
 
@@ -1303,6 +1363,12 @@ upscale_video() {
     local output_file="$1"
     local frames_dir="$TEMP_DIR/frames"
 
+    # SeedVR2 runs in its own venv and produces a finished video, not PNG frames.
+    if [[ "$IS_SEEDVR2" == true ]]; then
+        upscale_seedvr2 "$output_file"
+        return
+    fi
+
     mkdir -p "$frames_dir"
     source "$VENV_DIR/bin/activate"
 
@@ -1352,15 +1418,89 @@ upscale_video() {
     fi
 
     print_success "Upscaling complete"
-    encode_output "$frames_dir" "$output_file"
+    encode_output "$output_file"
+}
+
+upscale_seedvr2() {
+    local output_file="$1"
+    local raw_video="$TEMP_DIR/seedvr2_raw.mkv"
+    local feed="$UPSCALE_SOURCE"
+
+    # SeedVR2 has no aspect awareness — it upscales stored pixels as-if-square. For
+    # anamorphic sources (e.g. PAL 720x576 shown 16:9) that distorts the result. We
+    # de-anamorphize UP FRONT so the model reconstructs detail at correct geometry,
+    # rather than stretching (and softening) it afterwards. The scale 'dar' variable
+    # is the source's display aspect — for square-pixel sources this is a no-op.
+    if [[ "$INPUT_SAR" != "1:1" && -n "$INPUT_SAR" && "$INPUT_SAR" != "N/A" ]]; then
+        local square="$TEMP_DIR/seedvr2_square.mkv"
+        print_info "SeedVR2: de-anamorphizing source to square pixels (SAR ${INPUT_SAR})"
+        ffmpeg -i "$feed" \
+            -vf "scale=w='trunc(ih*dar/2)*2':h=ih:flags=lanczos,setsar=1" \
+            -an -sn -c:v libx264 -qp 0 -pix_fmt yuv420p \
+            "$square" -y -loglevel error \
+            && feed="$square" \
+            || print_warning "De-anamorphize failed — feeding original; final encode still corrects AR"
+    fi
+
+    # SeedVR2's --resolution is the target SHORT edge; for landscape that is the height.
+    local short_edge="$OUTPUT_HEIGHT"
+
+    if [[ "$RESUME" == true && -f "$raw_video" ]]; then
+        print_info "Resume: reusing existing SeedVR2 output ($raw_video)"
+    else
+        print_info "Starting SeedVR2 diffusion upscaling..."
+        print_info "Model: seedvr2 (${SEEDVR2_MODEL_FILE})  |  short-edge: ${short_edge}px  |  batch: ${SEEDVR2_BATCH}  |  chunk: ${SEEDVR2_CHUNK}  |  Prefilter: ${PREFILTER}"
+        print_warning "Diffusion VSR is slow (~4-7 s/frame on 16GB) — best for short/important clips."
+        print_warning "First run downloads weights (~3.6GB) to ${SEEDVR2_MODEL_DIR}."
+
+        # Lossless speedups (no quality change): torch.compile + chosen attention backend.
+        # 'auto' picks flash_attn_2 when flash-attn is importable in the SeedVR2 venv, else sdpa.
+        local attn="$SEEDVR2_ATTENTION"
+        if [[ "$attn" == "auto" ]]; then
+            if "$SEEDVR2_VENV/bin/python3" -c "import flash_attn" &>/dev/null; then
+                attn="flash_attn_2"; print_info "SeedVR2: flash-attn detected — using flash_attn_2 (lossless speedup)"
+            else
+                attn="sdpa"
+            fi
+        fi
+        local -a speed_opts=(--attention_mode "$attn")
+        [[ "$SEEDVR2_COMPILE" == true ]] && speed_opts+=(--compile_dit --compile_vae)
+
+        mkdir -p "$SEEDVR2_MODEL_DIR"
+        "$SEEDVR2_VENV/bin/python3" "$SEEDVR2_CLI" \
+            "$feed" \
+            --output "$raw_video" \
+            --output_format mp4 \
+            --video_backend ffmpeg \
+            --10bit \
+            --model_dir "$SEEDVR2_MODEL_DIR" \
+            --dit_model "$SEEDVR2_MODEL_FILE" \
+            --resolution "$short_edge" \
+            --batch_size "$SEEDVR2_BATCH" \
+            --chunk_size "$SEEDVR2_CHUNK" \
+            --temporal_overlap "$SEEDVR2_TEMPORAL_OVERLAP" \
+            --color_correction lab \
+            --blocks_to_swap "$SEEDVR2_BLOCKS_SWAP" \
+            --dit_offload_device cpu \
+            --vae_offload_device cpu \
+            --vae_encode_tiled --vae_encode_tile_size "$SEEDVR2_VAE_ENC_TILE" \
+            --vae_decode_tiled --vae_decode_tile_size "$SEEDVR2_VAE_DEC_TILE" \
+            "${speed_opts[@]}"
+
+        [[ -f "$raw_video" ]] || { print_error "SeedVR2 produced no output — see errors above."; exit 1; }
+    fi
+
+    print_success "Upscaling complete"
+    # Reuse the shared encoder. Aspect is already correct (de-anamorphized up front), so this
+    # stream-COPIES SeedVR2's video and just muxes audio/subs — no re-encode, no quality loss
+    # (unless --sharpen forces one). Passing the video as $2 selects that path.
+    encode_output "$output_file" "$raw_video"
 }
 
 encode_output() {
-    local frames_dir="$1"
-    local output_file="$2"
-
-    local fps
-    fps=$(cat "$frames_dir/fps.txt")
+    local output_file="$1"
+    local video_input="${2:-}"   # if set, encode from this video; else from frame PNGs in TEMP_DIR/frames
+    local frames_dir="$TEMP_DIR/frames"
 
     local crf
     case "$QUALITY" in
@@ -1370,22 +1510,33 @@ encode_output() {
         *)      print_error "Unknown quality: $QUALITY"; exit 1 ;;
     esac
 
-    print_info "Encoding: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT} @ ${fps}fps  preset:${ENCODE_SPEED} crf:${crf} → $output_file"
-
     local x265_preset="$ENCODE_SPEED"
     case "$ENCODE_SPEED" in
         slow|medium|fast) ;;
         *)  print_error "Unknown encode speed: $ENCODE_SPEED"; exit 1 ;;
     esac
 
-    # Final resize to exact target dimensions (safety net for rounding differences)
-    # plus optional sharpening
-    local vf_out="scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=lanczos"
-    if [[ "$SHARPEN" == true ]]; then
-        vf_out="${vf_out},unsharp=3:3:0.5:3:3:0.0"
+    # A finished video (SeedVR2) whose pixels are already final + correct AR can be stream-COPIED
+    # with audio/subs muxed on — no second encode, no generation loss. We only need to re-encode
+    # it if --sharpen was requested (a filter can't apply to a copied stream). The PNG-frame path
+    # (spandrel/basicsr) always encodes once here — that single pass is the deliverable encode.
+    local lossless_copy=false
+    if [[ -n "$video_input" && "$SHARPEN" == false ]]; then
+        lossless_copy=true
     fi
 
-    # Build ffmpeg inputs and mapping for audio/subtitles
+    # Primary input: finished video, or the upscaled PNG sequence (PNGs carry no fps → fps.txt).
+    local -a primary_input=()
+    local fps_note=""
+    if [[ -n "$video_input" ]]; then
+        primary_input=(-i "$video_input")
+    else
+        local fps; fps=$(cat "$frames_dir/fps.txt")
+        primary_input=(-framerate "$fps" -pattern_type glob -i "$frames_dir/frame_*.png")
+        fps_note=" @ ${fps}fps"
+    fi
+
+    # Build ffmpeg inputs and mapping for audio/subtitles (extracted from the original).
     local -a extra_inputs=()
     local -a extra_maps=()
     local -a extra_codecs=()
@@ -1403,19 +1554,37 @@ encode_output() {
         extra_codecs+=(-c:s copy)
     fi
 
-    ffmpeg \
-        -framerate "$fps" \
-        -pattern_type glob -i "$frames_dir/frame_*.png" \
-        "${extra_inputs[@]}" \
-        -map 0:v \
-        "${extra_maps[@]}" \
-        -vf "$vf_out" \
-        -c:v libx265 -crf "$crf" -preset "$x265_preset" \
-        -pix_fmt yuv420p10le \
-        -x265-params "no-open-gop=1:keyint=250:bframes=8:aq-mode=3" \
-        "${extra_codecs[@]}" \
-        -movflags +faststart \
-        "$output_file" -y -loglevel error -stats
+    if [[ "$lossless_copy" == true ]]; then
+        print_info "Muxing (lossless stream copy — no re-encode): → $output_file"
+        ffmpeg \
+            "${primary_input[@]}" \
+            "${extra_inputs[@]}" \
+            -map 0:v \
+            "${extra_maps[@]}" \
+            -c:v copy \
+            "${extra_codecs[@]}" \
+            -movflags +faststart \
+            "$output_file" -y -loglevel error -stats
+    else
+        print_info "Encoding: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}${fps_note}  preset:${ENCODE_SPEED} crf:${crf} → $output_file"
+        # Final resize to exact target dimensions (safety net for rounding differences) + sharpen.
+        local vf_out="scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:flags=lanczos"
+        if [[ "$SHARPEN" == true ]]; then
+            vf_out="${vf_out},unsharp=3:3:0.5:3:3:0.0"
+        fi
+        ffmpeg \
+            "${primary_input[@]}" \
+            "${extra_inputs[@]}" \
+            -map 0:v \
+            "${extra_maps[@]}" \
+            -vf "$vf_out" \
+            -c:v libx265 -crf "$crf" -preset "$x265_preset" \
+            -pix_fmt yuv420p10le \
+            -x265-params "no-open-gop=1:keyint=250:bframes=8:aq-mode=3" \
+            "${extra_codecs[@]}" \
+            -movflags +faststart \
+            "$output_file" -y -loglevel error -stats
+    fi
 
     print_success "Output saved: $output_file"
 }
@@ -1554,8 +1723,11 @@ interactive_setup() {
     echo -e "  ${GREEN}Temporal models${NC} (multi-frame — best consistency, much faster for long content)"
     echo "  15) basicvsr     — Best for TV/movies, degraded or compressed sources"
     echo ""
+    echo -e "  ${GREEN}Diffusion VSR${NC} (highest quality on low-res sources — but slow, short clips)"
+    echo "  16) seedvr2      — Reconstructs detail; biggest jump on low-res/compressed (~4-7 s/frame)"
+    echo ""
     while true; do
-        read -rp "Choose [1-15, default=1]: " model_choice
+        read -rp "Choose [1-16, default=1]: " model_choice
         local selected_key=""
         case "${model_choice:-1}" in
             1)  selected_key="spanmedium"   ;;
@@ -1573,19 +1745,27 @@ interactive_setup() {
             13) selected_key="hat"          ;;
             14) selected_key="nomos8kdat"   ;;
             15) selected_key="basicvsr"     ;;
+            16) selected_key="seedvr2"      ;;
             *) echo "  Invalid choice, try again."; continue ;;
         esac
-        # Validate model file exists
-        local model_file=""
-        if [[ -n "${MODEL_FILES[$selected_key]+_}" ]]; then
-            model_file="$MODEL_DIR/${MODEL_FILES[$selected_key]}"
-        elif [[ -n "${TEMPORAL_MODEL_FILES[$selected_key]+_}" ]]; then
-            model_file="$MODEL_DIR/${TEMPORAL_MODEL_FILES[$selected_key]}"
-        fi
-        if [[ ! -f "$model_file" ]]; then
-            echo -e "  ${RED}Model not found:${NC} $model_file"
-            echo "  Download it to $MODEL_DIR and try again, or choose a different model."
-            continue
+        # Validate availability. SeedVR2 lives in its own venv (no .pth); check the CLI.
+        if [[ "$selected_key" == "seedvr2" ]]; then
+            if [[ ! -f "$SEEDVR2_CLI" || ! -x "$SEEDVR2_VENV/bin/python3" ]]; then
+                echo -e "  ${RED}SeedVR2 not installed.${NC} Run: prototype/seedvr2/setup.sh"
+                continue
+            fi
+        else
+            local model_file=""
+            if [[ -n "${MODEL_FILES[$selected_key]+_}" ]]; then
+                model_file="$MODEL_DIR/${MODEL_FILES[$selected_key]}"
+            elif [[ -n "${TEMPORAL_MODEL_FILES[$selected_key]+_}" ]]; then
+                model_file="$MODEL_DIR/${TEMPORAL_MODEL_FILES[$selected_key]}"
+            fi
+            if [[ ! -f "$model_file" ]]; then
+                echo -e "  ${RED}Model not found:${NC} $model_file"
+                echo "  Download it to $MODEL_DIR and try again, or choose a different model."
+                continue
+            fi
         fi
         MODEL_KEY="$selected_key"
         break
@@ -1701,6 +1881,8 @@ if [[ "$RESUME" == false ]]; then
     rm -f  "$TEMP_DIR/upscale_temporal.py"
     rm -f  "$TEMP_DIR/audio.mka"
     rm -f  "$TEMP_DIR/subs.mkv"
+    rm -f  "$TEMP_DIR/seedvr2_raw.mkv"
+    rm -f  "$TEMP_DIR/seedvr2_square.mkv"
 fi
 
 mkdir -p "$TEMP_DIR/frames"

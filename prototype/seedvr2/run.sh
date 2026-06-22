@@ -37,6 +37,13 @@ VAE_DECODE_TILE_SIZE=768     # 1024 OOMs, 512 is slow (~15 tiles). 768 is the mi
 # if RAM allows, lower toward 130 if you still OOM.
 CHUNK_SIZE=250
 
+# Lossless speedups (identical output, just faster). torch.compile fuses kernels via Triton
+# (already installed). ATTENTION 'auto' uses flash_attn_2 if flash-attn is installed in the venv
+# (lossless + faster), else falls back to 'sdpa' — so you only `pip install flash-attn`, no flag
+# to flip. Pin to 'sdpa'/'flash_attn_2' to override. Do NOT use sageattn_* — QUANTIZED (lossy).
+COMPILE=true
+ATTENTION="auto"
+
 # Post-process: SeedVR2 drops audio and has no denoise, so we add both in one ffmpeg
 # pass after inference. DENOISE_VF is a minimal grain-reducer applied to the upscaled
 # 1080p output. Set DENOISE_VF="" to disable (then video is stream-copied, lossless).
@@ -108,6 +115,16 @@ info "SeedVR2 → $OUTPUT"
 info "model=$MODEL_FILE  res=${RESOLUTION}  batch=${BATCH_SIZE}  blocks_swap=${BLOCKS_TO_SWAP}"
 warn "First run downloads weights to $MODEL_DIR (~several GB) — be patient."
 
+# Resolve attention 'auto' → flash_attn_2 if flash-attn is importable in the venv, else sdpa.
+attn="$ATTENTION"
+if [[ "$attn" == "auto" ]]; then
+    if python -c "import flash_attn" &>/dev/null; then
+        attn="flash_attn_2"; info "flash-attn detected — using flash_attn_2 (lossless speedup)"
+    else
+        attn="sdpa"
+    fi
+fi
+
 # Args as an array so flags are easy to add/remove.
 args=(
     "$UPSCALE_INPUT"             # de-anamorphized feed when source is anamorphic, else original
@@ -129,7 +146,9 @@ args=(
     --vae_encode_tile_size "$VAE_ENCODE_TILE_SIZE"
     --vae_decode_tiled
     --vae_decode_tile_size "$VAE_DECODE_TILE_SIZE"
+    --attention_mode "$attn"        # resolved above; lossless (flash_attn_2 faster if installed)
 )
+[[ "$COMPILE" == true ]] && args+=(--compile_dit --compile_vae)   # lossless torch.compile speedup
 
 info "Command: python $CLI ${args[*]}"
 echo ""

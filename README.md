@@ -160,6 +160,34 @@ Temporal models require:
 
 All models are 4x. The script uses the model's native 4x output and resizes to your target resolution at the FFmpeg encode step.
 
+### Diffusion VSR (SeedVR2)
+
+`seedvr2` is a different class of model — **one-step diffusion video super-resolution**. Where the spandrel/basicsr models *sharpen and clean* the detail already present, SeedVR2 *reconstructs* plausible detail using a learned prior of how real video looks. On genuinely low-resolution, compressed live-action it is the single biggest quality jump available — well beyond what ESRGAN/transformer/BasicVSR++ can reach.
+
+It comes with trade-offs you must weigh against your use case:
+
+- **Slow.** ~4–7 s/frame on a 4060 Ti 16GB. Practical for short, important clips — **not** full-length episodes (a 45-min episode would take days). For length, BasicVSR++ remains the workhorse.
+- **Generative.** It can *fabricate* fine detail that wasn't in the source (skin texture, small text). Usually convincing, occasionally a fidelity drift — a real tension with faithful archival restoration. Judge it on your own content.
+- **Separate install.** SeedVR2 needs a different PyTorch build, so it runs in its **own venv** (`~/ai-upscale/seedvr2/`) via the upstream standalone CLI — it does not touch the main pipeline's venv. Set it up once:
+
+  ```bash
+  cd <repo>/prototype/seedvr2 && ./setup.sh
+  ```
+
+  Model weights (3B FP8, ~3.6 GB) auto-download to `~/ai-upscale/models/SEEDVR2/` on first run — nothing to fetch manually.
+
+Once installed, it's a first-class model key — the main script handles audio, subtitles, and aspect-ratio correction exactly as with any other model:
+
+```bash
+./upscale_video.sh -i clip.mkv -r 1080p -m seedvr2
+```
+
+Aspect ratio is corrected **up front** (anamorphic sources are de-anamorphized to square pixels before SeedVR2 sees them, so detail is reconstructed at correct geometry rather than stretched afterwards). The final step then **stream-copies** SeedVR2's video and only muxes on audio/subtitles — no second encode, no generation loss. (Passing `--sharpen` is the one exception: a filter forces a re-encode.)
+
+**16GB notes:** SeedVR2 is tuned in `upscale_video.sh` (the `SEEDVR2_*` variables) for a 4060 Ti 16GB — 3B FP8, block-swap, VAE tiling, and **chunked streaming** (`SEEDVR2_CHUNK`). The streaming is important: loading a whole clip holds the entire output in system RAM and will OOM-kill on long clips, so the default processes in bounded chunks. **32 GB system RAM recommended** (16 GB is marginal because the CPU-offload that frees VRAM lands in RAM).
+
+**Speed (lossless only):** `torch.compile` is on by default (`SEEDVR2_COMPILE`) — it fuses GPU kernels via Triton for a 20–40% speedup without changing the output. Attention defaults to `auto` (`SEEDVR2_ATTENTION`): if `flash-attn` is installed in the SeedVR2 venv it uses `flash_attn_2` (lossless, faster) automatically, otherwise it falls back to `sdpa` — so the only step to get the speedup is `pip install flash-attn`, no flag to flip. SageAttention is deliberately **not** used — it quantizes attention (an approximation), which conflicts with the quality-first goal.
+
 ### Estimated total upscale time (1 hour, 25fps, 4060 Ti 16GB)
 
 | Model | 480p source | 720p source |
@@ -168,8 +196,9 @@ All models are 4x. The script uses the model's native 4x output and resizes to y
 | nomos8k / ultrasharp / lsdir | ~100 hrs | ~250 hrs |
 | hat | ~200 hrs | ~500 hrs |
 | nomos8kdat | ~600 hrs | ~1600 hrs |
+| seedvr2 | impractical at this length — short clips only (~4–7 s/frame) | — |
 
-BasicVSR++ is 5-15x faster than single-frame models and is the recommended choice for any content longer than a few minutes.
+BasicVSR++ is 5-15x faster than single-frame models and is the recommended choice for any content longer than a few minutes. For short clips where maximum quality matters most, `seedvr2` is the top tier.
 
 ## Quick Start
 
@@ -233,6 +262,7 @@ Model:
                             RRDB: nomos8k (default), lsdirplus, lsdir, ultrasharp, realesrgan
                             Transformer: atdjpg, nomos8kschat, hat, nomos8kdat
                             Temporal: basicvsr
+                            Diffusion VSR: seedvr2 (separate install — highest quality, slow)
 
 Pre-processing:
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -314,6 +344,10 @@ All models are 4x. Selection guide:
 **Temporal (basicsr) — process a sliding window of frames:**
 
 - **basicvsr** — BasicVSR++ with bidirectional propagation and optical flow alignment. 5-15x faster than single-frame models. Better temporal consistency and less flickering. The only practical model for full-length TV episodes and movies on consumer hardware. Best for degraded/compressed sources where noise is consistent across frames.
+
+**Diffusion VSR — highest quality on low-res sources, short clips only:**
+
+- **seedvr2** — One-step diffusion VSR. *Reconstructs* plausible detail rather than only sharpening, making it the biggest quality jump available on genuinely low-res/compressed live-action. Slow (~4–7 s/frame on 16GB) and generative (can fabricate fine detail), so best reserved for short, important clips where quality matters most. Separate install (`prototype/seedvr2/setup.sh`) — see the [Diffusion VSR (SeedVR2)](#diffusion-vsr-seedvr2) section above for the full rundown and 16GB notes.
 
 ### --temporal-window
 
