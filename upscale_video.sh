@@ -52,29 +52,31 @@ TEMPORAL_WINDOW="auto"
 SPYNET_PATH=""
 
 # ── SeedVR2 settings (tuned for RTX 4060 Ti 16GB) ─────────────────────────────
-# Validated config from the prototype. Edit if your GPU/RAM differs.
-SEEDVR2_MODEL_FILE="seedvr2_ema_3b_fp8_e4m3fn.safetensors"  # 3B FP8 — fits 16GB with swap
-SEEDVR2_BATCH=13            # frames/batch (4n+1); higher = better temporal consistency + more VRAM
-SEEDVR2_BLOCKS_SWAP=16      # transformer blocks offloaded to CPU RAM (VRAM saver)
-SEEDVR2_VAE_ENC_TILE=1024   # VAE encode tile px
-SEEDVR2_VAE_DEC_TILE=768    # VAE decode tile px (1024 OOMs in decode on 16GB; 768 is the sweet spot)
-SEEDVR2_TEMPORAL_OVERLAP=3  # frames blended between batches/chunks — smooths seams
-SEEDVR2_CHUNK=250           # streaming chunk size — keeps system RAM flat vs clip length (REQUIRED
+# Validated config from the prototype. Edit here, OR override any of these per-run via an
+# environment variable, e.g.:  SEEDVR2_SEGMENT_SECONDS=60 ./upscale_video.sh -i x.mkv -r 1080p -m seedvr2
+# (the ${VAR:-default} form below is what makes env overrides take effect).
+SEEDVR2_MODEL_FILE="${SEEDVR2_MODEL_FILE:-seedvr2_ema_3b_fp8_e4m3fn.safetensors}"  # 3B FP8 — fits 16GB with swap
+SEEDVR2_BATCH="${SEEDVR2_BATCH:-13}"            # frames/batch (4n+1); higher = better temporal consistency + more VRAM
+SEEDVR2_BLOCKS_SWAP="${SEEDVR2_BLOCKS_SWAP:-16}"      # transformer blocks offloaded to CPU RAM (VRAM saver)
+SEEDVR2_VAE_ENC_TILE="${SEEDVR2_VAE_ENC_TILE:-1024}"   # VAE encode tile px
+SEEDVR2_VAE_DEC_TILE="${SEEDVR2_VAE_DEC_TILE:-768}"    # VAE decode tile px (1024 OOMs in decode on 16GB; 768 is the sweet spot)
+SEEDVR2_TEMPORAL_OVERLAP="${SEEDVR2_TEMPORAL_OVERLAP:-3}"  # frames blended between batches/chunks — smooths seams
+SEEDVR2_CHUNK="${SEEDVR2_CHUNK:-250}"           # streaming chunk size — keeps system RAM flat vs clip length (REQUIRED
                             # for long clips; whole-clip load OOM-kills). 0 = load all (short only).
 # Speed optimizations that are LOSSLESS (identical output, just faster) — on by default.
 # torch.compile fuses GPU kernels via Triton (already installed); does not change the math.
-SEEDVR2_COMPILE=true        # set false if compile errors out or its first-batch overhead hurts tiny clips
+SEEDVR2_COMPILE="${SEEDVR2_COMPILE:-true}"        # set false if compile errors out or its first-batch overhead hurts tiny clips
 # Attention backend. 'auto' = use flash_attn_2 if flash-attn is installed in the SeedVR2 venv
 # (lossless: exact attention, just fused, and faster), else fall back to 'sdpa' (also lossless,
 # needs nothing). So to get the speedup you ONLY `pip install flash-attn` — no flag to flip.
 # Pin to 'sdpa' or 'flash_attn_2' to override. Do NOT use sageattn_* — it QUANTIZES (lossy).
-SEEDVR2_ATTENTION="auto"
+SEEDVR2_ATTENTION="${SEEDVR2_ATTENTION:-auto}"
 # Auto-segmentation for long files. A 45-min clip is ~4-5 DAYS of compute; running it as one
 # process means a single crash/reboot loses everything (the CLI has no mid-run resume). So files
 # longer than this are split into segments, each upscaled independently and atomically, then
 # losslessly concatenated. --resume skips already-finished segments. Larger = fewer concat seams
 # but coarser checkpoints (lose more on a crash); smaller = finer checkpoints but more seams.
-SEEDVR2_SEGMENT_SECONDS=300   # 5 min. Set 0 to disable segmentation (single-shot regardless of length).
+SEEDVR2_SEGMENT_SECONDS="${SEEDVR2_SEGMENT_SECONDS:-300}"   # 5 min. Set 0 to disable segmentation (single-shot regardless of length).
 
 # ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
 declare -A MODEL_FILES=(
