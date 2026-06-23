@@ -40,6 +40,7 @@ MODEL_KEY="nomos8k"
 QUALITY="high"
 ENCODE_SPEED="slow"
 PREFILTER="light"
+PREFILTER_EXPLICIT=false   # tracks whether the user passed --prefilter (so per-model defaults can apply)
 DEINTERLACE=false
 RESUME=false
 SHARPEN=false
@@ -172,6 +173,8 @@ Model selection (-m / --model):
 Pre-processing (applied before AI upscaling to clean degraded sources):
   --prefilter LEVEL         none, light (default), medium, heavy
                               none       No filtering — use for clean/high-quality sources
+                                         (also the default for -m seedvr2: diffusion handles
+                                          degradation itself; pre-denoise removes detail cues)
                               light      Mild temporal denoise (default — safe for most content)
                               medium     Denoise + deblock (for visibly compressed/blocky sources)
                               heavy      Strong denoise + deblock + deringing
@@ -1746,7 +1749,7 @@ while [[ $# -gt 0 ]]; do
         --temporal-window)   TEMPORAL_WINDOW="$2"; shift 2 ;;
         -q|--quality)        QUALITY="$2";         shift 2 ;;
         --encode-speed)      ENCODE_SPEED="$2";    shift 2 ;;
-        --prefilter)         PREFILTER="$2";       shift 2 ;;
+        --prefilter)         PREFILTER="$2"; PREFILTER_EXPLICIT=true; shift 2 ;;
         --deinterlace)       DEINTERLACE=true;     shift   ;;
         --resume)            RESUME=true;          shift   ;;
         --sharpen)           SHARPEN=true;         shift   ;;
@@ -1870,15 +1873,24 @@ interactive_setup() {
     echo ""
 
     # ── Prefilter ─────────────────────────────────────────────────────────────
+    # SeedVR2 (generative, trained on degradation) does best with no pre-denoise, so its
+    # default is 'none'; the discriminative models default to 'light'.
+    local pf_default=2
+    [[ "$MODEL_KEY" == "seedvr2" ]] && pf_default=1
     echo -e "${BLUE}Pre-filter (noise/artifact reduction before AI upscaling):${NC}"
-    echo "  1) none    — Clean sources: Blu-ray, high-quality 1080p"
-    echo "  2) light   — Good default: mild denoise, safe for most content [default]"
+    if [[ "$MODEL_KEY" == "seedvr2" ]]; then
+        echo "  1) none    — Recommended for SeedVR2 (it reconstructs from real degradation) [default]"
+        echo "  2) light   — Mild denoise"
+    else
+        echo "  1) none    — Clean sources: Blu-ray, high-quality 1080p"
+        echo "  2) light   — Good default: mild denoise, safe for most content [default]"
+    fi
     echo "  3) medium  — Compressed/blocky sources: web downloads, streaming rips"
     echo "  4) heavy   — Badly degraded: VHS, old TV recordings, heavy compression"
     echo ""
     while true; do
-        read -rp "Choose [1-4, default=2]: " pf_choice
-        case "${pf_choice:-2}" in
+        read -rp "Choose [1-4, default=${pf_default}]: " pf_choice
+        case "${pf_choice:-$pf_default}" in
             1) PREFILTER="none";   break ;;
             2) PREFILTER="light";  break ;;
             3) PREFILTER="medium"; break ;;
@@ -2007,6 +2019,13 @@ if [[ "$USE_AI" == true ]]; then
         fi
         ;;
     esac
+
+    # SeedVR2 is generative and trained on degraded input, so pre-denoising tends to remove detail
+    # cues it would otherwise reconstruct. Default it to no prefilter unless the user asked for one.
+    if [[ "$IS_SEEDVR2" == true && "$PREFILTER_EXPLICIT" == false ]]; then
+        PREFILTER="none"
+        print_info "SeedVR2: defaulting to --prefilter none (diffusion handles degradation; pass --prefilter to override)"
+    fi
 
     # Tile size: if user didn't pass -t, Python will auto-probe the optimal size.
     # If user passed -t explicitly, that value is used as-is.
