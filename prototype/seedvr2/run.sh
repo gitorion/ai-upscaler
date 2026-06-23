@@ -41,7 +41,8 @@ CHUNK_SIZE=250
 # (already installed). ATTENTION 'auto' uses flash_attn_2 if flash-attn is installed in the venv
 # (lossless + faster), else falls back to 'sdpa' — so you only `pip install flash-attn`, no flag
 # to flip. Pin to 'sdpa'/'flash_attn_2' to override. Do NOT use sageattn_* — QUANTIZED (lossy).
-COMPILE=true
+COMPILE=true        # torch.compile the DiT (stable shapes — clean speedup)
+COMPILE_VAE=false   # VAE compile thrashes on torch 2.6 (many tile shapes → recompiles → eager fallback)
 ATTENTION="auto"
 
 # Post-process: SeedVR2 drops audio and has no denoise, so we add both in one ffmpeg
@@ -148,7 +149,8 @@ args=(
     --vae_decode_tile_size "$VAE_DECODE_TILE_SIZE"
     --attention_mode "$attn"        # resolved above; lossless (flash_attn_2 faster if installed)
 )
-[[ "$COMPILE" == true ]] && args+=(--compile_dit --compile_vae)   # lossless torch.compile speedup
+[[ "$COMPILE" == true ]] && args+=(--compile_dit)        # lossless torch.compile speedup (DiT)
+[[ "$COMPILE_VAE" == true ]] && args+=(--compile_vae)    # off by default — thrashes on dynamic VAE shapes
 
 info "Command: python $CLI ${args[*]}"
 echo ""

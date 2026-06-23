@@ -65,7 +65,11 @@ SEEDVR2_CHUNK="${SEEDVR2_CHUNK:-250}"           # streaming chunk size — keeps
                             # for long clips; whole-clip load OOM-kills). 0 = load all (short only).
 # Speed optimizations that are LOSSLESS (identical output, just faster) — on by default.
 # torch.compile fuses GPU kernels via Triton (already installed); does not change the math.
-SEEDVR2_COMPILE="${SEEDVR2_COMPILE:-true}"        # set false if compile errors out or its first-batch overhead hurts tiny clips
+SEEDVR2_COMPILE="${SEEDVR2_COMPILE:-true}"        # compile the DiT (stable shapes — clean ~20-40% win)
+# VAE compile is OFF by default: the VAE's tiled conv layers have many shapes, so torch 2.6's
+# dynamo thrashes (hits cache_size_limit, recompiles, falls back to eager) — wasted warmup re-paid
+# per segment, no speedup. Enable only if you've raised the dynamo cache limit and measured a win.
+SEEDVR2_COMPILE_VAE="${SEEDVR2_COMPILE_VAE:-false}"
 # Attention backend. 'auto' = use flash_attn_2 if flash-attn is installed in the SeedVR2 venv
 # (lossless: exact attention, just fused, and faster), else fall back to 'sdpa' (also lossless,
 # needs nothing). So to get the speedup you ONLY `pip install flash-attn` — no flag to flip.
@@ -1447,7 +1451,8 @@ seedvr2_infer() {
         fi
     fi
     local -a speed_opts=(--attention_mode "$attn")
-    [[ "$SEEDVR2_COMPILE" == true ]] && speed_opts+=(--compile_dit --compile_vae)
+    [[ "$SEEDVR2_COMPILE" == true ]] && speed_opts+=(--compile_dit)
+    [[ "$SEEDVR2_COMPILE_VAE" == true ]] && speed_opts+=(--compile_vae)
 
     mkdir -p "$SEEDVR2_MODEL_DIR"
     "$SEEDVR2_VENV/bin/python3" "$SEEDVR2_CLI" \
