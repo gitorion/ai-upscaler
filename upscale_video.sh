@@ -21,7 +21,8 @@ NC='\033[0m'
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$HOME/ai-upscale"
 MODEL_DIR="$SCRIPT_DIR/models"
-TEMP_DIR="$SCRIPT_DIR/temp"
+TEMP_DIR="${UPSCALE_TEMP_DIR:-$SCRIPT_DIR/temp}"   # override via env to isolate temp (e.g. A/B tests
+                                                   # that must not wipe a paused run's segments)
 VENV_DIR="$SCRIPT_DIR/venv"
 
 # SeedVR2 (diffusion VSR) runs in its OWN venv with a different torch build, via the
