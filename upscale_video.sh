@@ -118,6 +118,10 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# True if ffprobe can read the file as valid media — used to skip corrupt extracted
+# audio/subtitle streams so a bad stream can't kill the final mux.
+probe_ok() { ffprobe -v error -i "$1" -show_entries format=duration -of csv=p=0 >/dev/null 2>&1; }
+
 usage() {
     cat << EOF
 ${GREEN}AI Video Upscaler${NC} — spandrel + basicsr edition, live-action optimised
@@ -535,11 +539,11 @@ extract_audio() {
     # Extract all audio streams from original input (cleaned_source.mkv has -an / no audio)
     ffmpeg -i "$input_file" -vn -sn -map 0:a -c:a copy "$audio_file" -y -loglevel error || true
 
-    if [[ -f "$audio_file" && -s "$audio_file" ]]; then
+    if [[ -f "$audio_file" && -s "$audio_file" ]] && probe_ok "$audio_file"; then
         print_success "Audio extracted"
     else
         HAS_AUDIO=false
-        print_warning "Audio extraction failed — encoding without audio"
+        print_warning "Audio extraction failed or unreadable — encoding without audio"
     fi
 }
 
@@ -561,11 +565,11 @@ extract_subs() {
     # Extract all subtitle streams from original input
     ffmpeg -i "$input_file" -vn -an -map 0:s -c:s copy "$subs_file" -y -loglevel error || true
 
-    if [[ -f "$subs_file" && -s "$subs_file" ]]; then
+    if [[ -f "$subs_file" && -s "$subs_file" ]] && probe_ok "$subs_file"; then
         print_success "Subtitles extracted"
     else
         HAS_SUBS=false
-        print_warning "Subtitle extraction failed — encoding without subtitles"
+        print_warning "Subtitle extraction failed or unreadable — encoding without subtitles"
     fi
 }
 
@@ -1642,17 +1646,30 @@ encode_output() {
     local -a extra_maps=()
     local -a extra_codecs=()
 
+    # Track the ffmpeg input index as we add streams (0 is the primary video) so the -map
+    # indices stay correct no matter which of audio/subs are included. Each extracted stream
+    # is validated with probe_ok — a corrupt audio.mka/subs.mkv is skipped (with a warning)
+    # rather than failing the whole encode. (Bad subs can happen when a clip is cut mid-stream.)
+    local input_idx=1
     if [[ "$HAS_AUDIO" == true && -f "$TEMP_DIR/audio.mka" ]]; then
-        extra_inputs+=(-i "$TEMP_DIR/audio.mka")
-        extra_maps+=(-map 1:a)
-        extra_codecs+=(-c:a copy)
+        if probe_ok "$TEMP_DIR/audio.mka"; then
+            extra_inputs+=(-i "$TEMP_DIR/audio.mka")
+            extra_maps+=(-map "${input_idx}:a")
+            extra_codecs+=(-c:a copy)
+            input_idx=$((input_idx + 1))
+        else
+            print_warning "Extracted audio is unreadable — encoding without audio"
+        fi
     fi
     if [[ "$HAS_SUBS" == true && -f "$TEMP_DIR/subs.mkv" ]]; then
-        local sub_idx=1
-        [[ "$HAS_AUDIO" == true && -f "$TEMP_DIR/audio.mka" ]] && sub_idx=2
-        extra_inputs+=(-i "$TEMP_DIR/subs.mkv")
-        extra_maps+=(-map "${sub_idx}:s")
-        extra_codecs+=(-c:s copy)
+        if probe_ok "$TEMP_DIR/subs.mkv"; then
+            extra_inputs+=(-i "$TEMP_DIR/subs.mkv")
+            extra_maps+=(-map "${input_idx}:s")
+            extra_codecs+=(-c:s copy)
+            input_idx=$((input_idx + 1))
+        else
+            print_warning "Extracted subtitles are unreadable — encoding without subtitles"
+        fi
     fi
 
     if [[ "$lossless_copy" == true ]]; then

@@ -40,12 +40,14 @@ command -v ffmpeg >/dev/null || { err "ffmpeg not found"; exit 1; }
 mkdir -p "$AB_DIR"
 CLIP="$AB_DIR/clip.mkv"
 
-# Cut the test clip (lossless stream copy).
+# Cut the test clip — VIDEO ONLY (lossless stream copy). We drop audio/subs because (a) the
+# comparison is purely visual and (b) cutting subtitles mid-stream with -c copy produces a
+# corrupt track that would otherwise break the mux.
 if [[ -f "$CLIP" ]]; then
     info "Reusing existing clip: $CLIP"
 else
-    info "Cutting ${CLIP_LEN}s clip at ${START}..."
-    ffmpeg -y -loglevel error -ss "$START" -i "$SRC" -t "$CLIP_LEN" -c copy "$CLIP"
+    info "Cutting ${CLIP_LEN}s clip at ${START} (video only)..."
+    ffmpeg -y -loglevel error -ss "$START" -i "$SRC" -t "$CLIP_LEN" -map 0:v:0 -an -sn -c copy "$CLIP"
 fi
 
 # ── Run one variant (skip if already done) ───────────────────────────────────
