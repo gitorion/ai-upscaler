@@ -1983,6 +1983,16 @@ if [[ ! -f "$INPUT_FILE" ]]; then
     exit 1
 fi
 
+# Per-input temp namespace: each input gets its OWN temp subdir, so a fresh (non-resume) run on
+# one file can never wipe another file's in-progress work (segments, cleaned_source, audio...),
+# and --resume always finds the correct input's temp — never a stale one from a different file.
+# (This is the safe default; UPSCALE_TEMP_DIR still overrides the base path.)
+INPUT_SLUG=$(basename "$INPUT_FILE")     # strips path (and trailing newline via $())
+INPUT_SLUG="${INPUT_SLUG%.*}"            # drop extension
+INPUT_SLUG="${INPUT_SLUG//[^A-Za-z0-9._-]/_}"   # sanitize any other chars to _
+TEMP_DIR="$TEMP_DIR/$INPUT_SLUG"
+print_info "Temp: $TEMP_DIR"
+
 if [[ -z "$OUTPUT_FILE" ]]; then
     BASENAME=$(basename "$INPUT_FILE" | sed 's/\.[^.]*$//')
     OUTPUT_FILE="${BASENAME}_upscaled_${RESOLUTION}.mkv"
