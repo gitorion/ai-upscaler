@@ -2,11 +2,16 @@
 
 ##############################################################################
 # AI Video Upscaler - Automated Installation Script
-# For Ubuntu 24.04 LTS with NVIDIA GPU
-# Updated for latest stable drivers and packages (February 2026)
+# For Ubuntu 24.04 LTS or newer with NVIDIA GPU
+# Updated for latest stable drivers and packages (July 2026)
 ##############################################################################
 
 set -e
+
+# Absolute path to the directory containing this installer (and upscale_video.sh).
+# Captured here, before any `cd`, because $0/BASH_SOURCE is relative to the original
+# cwd — later steps chdir into $HOME/ai-upscale, which would break a lazy lookup.
+SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors
 RED='\033[0;31m'
@@ -163,6 +168,70 @@ install_dependencies() {
     print_success "Dependencies installed"
 }
 
+# Verify basicsr is usable via the SAME neutered-import path upscale_video.sh uses:
+# basicsr's __init__.py has broken wildcard imports (it pulls torchvision internals
+# removed in newer versions), so the app bypasses __init__ and imports basicsr.archs
+# directly. A plain `import basicsr` would wrongly report failure; this checks what
+# actually matters — that basicsr.archs.basicvsrpp_arch loads.
+verify_basicsr() {
+    python3 - <<'PYEOF' 2>/dev/null
+import importlib.util, types, sys
+spec = importlib.util.find_spec('basicsr')
+if spec is None:
+    sys.exit(1)
+m = types.ModuleType('basicsr')
+m.__path__ = spec.submodule_search_locations or [spec.origin.rsplit('/', 1)[0]]
+m.__package__ = 'basicsr'
+sys.modules['basicsr'] = m
+import basicsr.archs.basicvsrpp_arch  # noqa: F401
+PYEOF
+}
+
+install_basicsr() {
+    print_info "Installing basicsr (required for temporal models: basicvsr)..."
+
+    # Try the normal install first — works on Python <= 3.12.
+    # basicsr may emit harmless deprecation warnings during install — safe to ignore.
+    pip install basicsr 2>&1 | grep -v "UserWarning\|FutureWarning\|DeprecationWarning" || true
+
+    if verify_basicsr; then
+        print_success "basicsr installed"
+        return 0
+    fi
+
+    # The pip build fails on Python 3.13+ : basicsr's setup.py get_version() relies on
+    # exec()/locals() behaviour that changed, raising KeyError: '__version__'. The app
+    # only needs basicsr.archs.*, not a built package, so vendor the source directly.
+    print_warning "basicsr pip build failed (known Python 3.13+ setup.py issue) — vendoring source..."
+
+    local sp tmp url
+    sp=$(python3 -c "import site; print(site.getsitepackages()[0])")
+    tmp=$(mktemp -d)
+    url=$(python3 - <<'PYEOF'
+import json, urllib.request
+d = json.load(urllib.request.urlopen("https://pypi.org/pypi/basicsr/1.4.2/json"))
+print(next(u["url"] for u in d["urls"] if u["packagetype"] == "sdist"))
+PYEOF
+)
+
+    if [ -n "$url" ] && curl -sL -o "$tmp/basicsr.tar.gz" "$url" && tar xzf "$tmp/basicsr.tar.gz" -C "$tmp"; then
+        cp -r "$tmp/basicsr-1.4.2/basicsr" "$sp/"
+        mkdir -p "$sp/basicsr-1.4.2.dist-info"
+        printf 'Metadata-Version: 2.1\nName: basicsr\nVersion: 1.4.2\n' > "$sp/basicsr-1.4.2.dist-info/METADATA"
+        printf 'basicsr\n' > "$sp/basicsr-1.4.2.dist-info/top_level.txt"
+        rm -rf "$tmp"
+        if verify_basicsr; then
+            print_success "basicsr vendored to site-packages"
+            return 0
+        fi
+    fi
+
+    rm -rf "$tmp"
+    print_error "basicsr install failed — temporal models (basicvsr, realbasicvsr) will be unavailable"
+    print_warning "Single-frame models and SeedVR2 are unaffected"
+    return 0
+}
+
 setup_ai_upscale() {
     print_header "Setting up AI Upscale Environment"
 
@@ -181,8 +250,8 @@ setup_ai_upscale() {
     print_info "Upgrading pip to latest version..."
     pip install --upgrade pip setuptools wheel
 
-    print_info "Installing PyTorch with CUDA 12.4 support (latest stable)..."
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+    print_info "Installing PyTorch with CUDA 12.6 support (latest stable)..."
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 
     print_info "Installing spandrel (universal model loader) and dependencies..."
     pip install spandrel spandrel-extra-arches
@@ -190,9 +259,7 @@ setup_ai_upscale() {
     pip install tqdm
     pip install numpy
 
-    print_info "Installing basicsr (required for temporal models: basicvsr)..."
-    # basicsr may emit harmless deprecation warnings during install — these are safe to ignore
-    pip install basicsr 2>&1 | grep -v "UserWarning\|FutureWarning\|DeprecationWarning" || true
+    install_basicsr
 
     print_success "Python environment configured"
 
@@ -326,8 +393,10 @@ copy_scripts() {
     INSTALL_DIR="$HOME/ai-upscale"
     SCRIPT_FOUND=false
 
-    # Try multiple locations for upscale_video.sh
-    for path in "./upscale_video.sh" "$(dirname "$0")/upscale_video.sh" "$HOME/Downloads/upscale_video.sh"; do
+    # Try multiple locations for upscale_video.sh. $SCRIPT_SOURCE_DIR (the installer's
+    # own directory, captured before any cd) is checked first — by the time this runs
+    # the working directory is $HOME/ai-upscale, so relative lookups would miss the repo.
+    for path in "$SCRIPT_SOURCE_DIR/upscale_video.sh" "./upscale_video.sh" "$(dirname "$0")/upscale_video.sh" "$HOME/Downloads/upscale_video.sh"; do
         if [ -f "$path" ]; then
             print_info "Found upscale_video.sh at: $path"
             print_info "Copying to $INSTALL_DIR..."
@@ -419,7 +488,7 @@ if [ -f ~/ai-upscale/venv/bin/python3 ]; then
     else
         echo "✗ FAILED — CUDA not available in PyTorch"
         echo "   Fix: source ~/ai-upscale/venv/bin/activate"
-        echo "        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124"
+        echo "        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126"
     fi
 else
     echo "✗ FAILED (venv not found)"
