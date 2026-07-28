@@ -188,6 +188,19 @@ Aspect ratio is corrected **up front** (anamorphic sources are de-anamorphized t
 
 **Long files (auto-segmentation + resume):** A full episode is ~4–5 days of compute, and the SeedVR2 CLI has no mid-run checkpoint — a single crash or reboot would lose everything. So files longer than `SEEDVR2_SEGMENT_SECONDS` (default 5 min) are automatically split into segments, each upscaled independently and written atomically, then losslessly concatenated with audio/subs muxed back on. If a run is interrupted, re-run the **exact same command with `--resume`** and it skips every already-finished segment and picks up where it left off. At completion the segment intermediates are cleaned up and you get a single output file. So a 45-minute source *is* practical — it just takes days, survives interruptions, and you can stop/resume freely. Set `SEEDVR2_SEGMENT_SECONDS=0` to force single-shot.
 
+**Whole seasons (`batch_upscale.sh`):** to upscale a folder of episodes in one unattended run, use the batch wrapper instead of calling `upscale_video.sh` per file:
+
+```bash
+./batch_upscale.sh -i ~/season_1 -r 1080p --prefilter none -m seedvr2
+```
+
+It processes each episode in turn, forwarding every upscaler flag verbatim (so quality is identical to a single run), and is resumable at **two levels**:
+
+- **Between episodes** — an episode whose finished output already exists (and is a valid video) is skipped. So if 3 of 9 episodes are done and the run is interrupted, re-running the *same command* picks up at episode 4. There's no state file to lose: the finished outputs themselves are the record of progress.
+- **Within an episode** — each child run is invoked with `--resume`, so an episode that was interrupted mid-way (its segments survive under `temp/<episode>/`) continues rather than restarting.
+
+Disk stays flat across the season: the child cleans up its own temp when each episode finishes, so only one episode's working files exist at a time alongside the completed outputs. Finished files land in a sibling folder named `<input>_<res>` by default — e.g. `~/season_1` → `~/season_1_1080p/` (override with `-o`) — named `<episode>_upscaled_<res>.mkv`. By default the batch **stops on the first failed episode** and reports it (so a systemic problem like OOM or a full disk doesn't silently burn days across every episode) — pass `--keep-going` to continue past failures, or `--force` to reprocess episodes that already have outputs (**overwrites them**). Because it's non-interactive, `-r` is required.
+
 **Disk for a long run** (≈45 min, 720p→1080p): budget **~60 GB free** with the default prefilter, or **~20 GB** with `--prefilter none`. The big cost is the lossless FFV1 prefilter intermediate (~20 GB) plus the input segments being lossless copies of it (another ~20 GB) — `--prefilter none` removes the FFV1 entirely (and SeedVR2's diffusion handles degradation well on its own), cutting disk ~3×. Rule of thumb at 1080p: output side ≈ 2 MB/s × duration with ~3× headroom; FFV1 prefilter ≈ 7.5 MB/s × duration with ~2×; multiply output-side figures by ~4 for 4K. Check with `df -h ~/ai-upscale` before starting.
 
 **16GB notes:** SeedVR2 is tuned in `upscale_video.sh` (the `SEEDVR2_*` variables) for a 4060 Ti 16GB — 3B FP8, block-swap, VAE tiling, and **chunked streaming** (`SEEDVR2_CHUNK`). The streaming is important: loading a whole clip holds the entire output in system RAM and will OOM-kill on long clips, so the default processes in bounded chunks. **32 GB system RAM recommended** (16 GB is marginal because the CPU-offload that frees VRAM lands in RAM).
@@ -244,10 +257,8 @@ Pass all options directly for scripted or automated use:
 # Resume an interrupted run
 ./upscale_video.sh -i recording.mkv -r 1080p --resume
 
-# Batch process a folder
-for f in /path/to/videos/*.mkv; do
-    ./upscale_video.sh -i "$f" -r 1080p -m basicvsr
-done
+# Batch a whole folder / season (resumable — see below)
+./batch_upscale.sh -i ~/season_1 -r 1080p --prefilter none -m seedvr2
 ```
 
 ## All Options
