@@ -1902,10 +1902,11 @@ flashvsr_budget_seconds() {
             sw = int(w * sc + 0.5); sh = int(h * sc + 0.5)
             tw = int((sw + 127) / 128) * 128
             th = int((sh + 127) / 128) * 128
-            # x2: the input tensor is held for the whole clip AND the decoded output accumulates
-            # alongside it as tiles are assembled, so peak VRAM carries ~two full-resolution copies.
-            # Measured: 375 frames OOMs in VAE decode at the last tile, 189 frames completes.
-            per_frame = tw * th * 3 * bpc * 2
+            # x3.5: peak VRAM is at the STITCH step, which simultaneously holds the whole-clip input
+            # tensor, all decoded tiles, the output canvas and a single-channel weight canvas.
+            # Measured on a 4060 Ti at 1920x1080 out: 375 frames OOMs in VAE decode, 250 frames OOMs
+            # allocating the 1.04GB weight canvas in stitch_video_tiles_back, 126 frames completes.
+            per_frame = tw * th * 3 * bpc * 3.5
             if (per_frame <= 0) exit
             frames = (budget * 1048576) / per_frame
             secs = int(frames / f)
