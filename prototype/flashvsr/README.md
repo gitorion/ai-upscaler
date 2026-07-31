@@ -37,10 +37,10 @@ and builds for what's actually present. Override with `BLOCK_SPARSE_ATTN_CUDA_AR
 
 ```bash
 # Short clip — smoke-test first
-~/ai-upscale/upscale_video.sh -i clip.mkv -r 1080p -m flashvsr
+~/ai-upscaler/upscale_video.sh -i clip.mkv -r 1080p --prefilter none -m flashvsr
 
 # Full episode (auto-segmented + resumable, same as seedvr2)
-~/ai-upscale/upscale_video.sh -i s01e01.mkv -r 1080p --prefilter none -m flashvsr
+~/ai-upscaler/upscale_video.sh -i s01e01.mkv -r 1080p --prefilter none -m flashvsr
 
 # A whole season
 ~/ai-upscaler/batch_upscale.sh -i ~/season_1 -r 1080p --prefilter none -m flashvsr
