@@ -184,6 +184,8 @@ Once installed, it's a first-class model key — the main script handles audio, 
 
 Aspect ratio is corrected **up front** (anamorphic sources are de-anamorphized to square pixels before SeedVR2 sees them, so detail is reconstructed at correct geometry rather than stretched afterwards). The final step then **stream-copies** SeedVR2's video and only muxes on audio/subtitles — no second encode, no generation loss. (Passing `--sharpen` is the one exception: a filter forces a re-encode.)
 
+**Motion-quality defaults (batch size).** `SEEDVR2_BATCH` is the single most important setting for movement. Each batch generates its detail independently, so the batch length *is* the window of temporal context. At the old default of 13 (~0.5s at 25fps) consecutive batches disagree during motion — the model re-invents texture on moving surfaces, which reads as crawling/shimmer — while static shots, where successive batches see near-identical input, look excellent. That "great on stills, poor on movement" split is the signature of too small a batch. The default is now **21** (~0.85s), funded by raising `SEEDVR2_BLOCKS_SWAP` to 32 (its max for the 3B model) to free the VRAM. `SEEDVR2_CHUNK` is 252 = 21 × 12 so every batch in a chunk is full-length — a ragged final batch is exactly what `temporal_overlap` is documented to compensate for. Expect a **slower** run: more block swapping means more CPU↔GPU traffic. Batch must always be `4n+1` (1, 5, 9, 13, 17, 21, 25…); 25 is the next step if you have headroom.
+
 **Defaults tuned from real-content A/B testing:** SeedVR2 uses `--prefilter light` and `SEEDVR2_TEMPORAL_OVERLAP=0`. On flat surfaces (e.g. a static wall) during motion, the generative model can produce two distracting artifacts: a shimmering **noise layer** (it hallucinates unstable texture from source grain) and a **ghost/echo** that doesn't track the scene. A light pre-denoise tames the noise layer (giving the model a cleaner canvas), and overlap `0` removes the ghost (which comes from blending two batches' differing generations across the overlap). Both were confirmed to help on a real 480p source. Tune per source if needed: drop to `--prefilter none` to feed maximum detail (cleaner sources), step up to `medium` for heavy compression blocking, or raise `SEEDVR2_TEMPORAL_OVERLAP` if you ever see chunk-boundary seams instead of ghosting.
 
 **Long files (auto-segmentation + resume):** A full episode is ~4–5 days of compute, and the SeedVR2 CLI has no mid-run checkpoint — a single crash or reboot would lose everything. So files longer than `SEEDVR2_SEGMENT_SECONDS` (default 5 min) are automatically split into segments, each upscaled independently and written atomically, then losslessly concatenated with audio/subs muxed back on. If a run is interrupted, re-run the **exact same command with `--resume`** and it skips every already-finished segment and picks up where it left off. At completion the segment intermediates are cleaned up and you get a single output file. So a 45-minute source *is* practical — it just takes days, survives interruptions, and you can stop/resume freely. Set `SEEDVR2_SEGMENT_SECONDS=0` to force single-shot.
@@ -206,6 +208,34 @@ Disk stays flat across the season: the child cleans up its own temp when each ep
 **16GB notes:** SeedVR2 is tuned in `upscale_video.sh` (the `SEEDVR2_*` variables) for a 4060 Ti 16GB — 3B FP8, block-swap, VAE tiling, and **chunked streaming** (`SEEDVR2_CHUNK`). The streaming is important: loading a whole clip holds the entire output in system RAM and will OOM-kill on long clips, so the default processes in bounded chunks. **32 GB system RAM recommended** (16 GB is marginal because the CPU-offload that frees VRAM lands in RAM).
 
 **Speed (lossless only):** `torch.compile` is on by default (`SEEDVR2_COMPILE`) — it fuses GPU kernels via Triton for a 20–40% speedup without changing the output. Attention defaults to `auto` (`SEEDVR2_ATTENTION`): if `flash-attn` is installed in the SeedVR2 venv it uses `flash_attn_2` (lossless, faster) automatically, otherwise it falls back to `sdpa` — so the only step to get the speedup is `pip install flash-attn`, no flag to flip. SageAttention is deliberately **not** used — it quantizes attention (an approximation), which conflicts with the quality-first goal.
+
+### Streaming Diffusion VSR (FlashVSR)
+
+`flashvsr` is the second diffusion engine, added alongside SeedVR2 rather than replacing it — both remain fully supported and you pick per source.
+
+**Why it exists.** SeedVR2 generates in fixed batches (`4n+1` frames). Each batch produces its detail independently, so during **motion** consecutive batches can disagree — crawling/shimmering texture, and discontinuities at batch boundaries — while static shots look excellent. That "great on stills, poor on movement" split is the characteristic SeedVR2 failure. [FlashVSR](https://github.com/OpenImagingLab/FlashVSR) (CVPR 2026) is built around *streaming* inference instead, specifically targeting temporal stability.
+
+Neither engine dominates. Published comparisons put SeedVR2 ahead on short, heavily-compressed clips and FlashVSR ahead on longer real-footage material at HD input — so on a clean 720p episode, try FlashVSR first.
+
+**Install** (its own venv, like SeedVR2 — the main venv is untouched):
+
+```bash
+cd ~/ai-upscaler/prototype/flashvsr && ./setup.sh
+```
+
+This is the slowest setup: Block-Sparse-Attention compiles from source (10–40 min). It auto-detects your GPU's CUDA architecture — worth noting because upstream's documented arch list (`80;90;100`) **omits `89`**, which is exactly what Ada cards like the 4060 Ti are.
+
+**Usage** is identical to any other model, including auto-segmentation, `--resume`, and `batch_upscale.sh`:
+
+```bash
+./upscale_video.sh -i s01e01.mkv -r 1080p --prefilter none -m flashvsr
+```
+
+**Output quality note.** FlashVSR's own writer is hardcoded to 8-bit H.264 CRF 20 (preset veryfast) even at its maximum `--quality 10` — which would cap this pipeline before our encoder ran. `setup.sh` patches in an opt-in **10-bit x265** writer (`FLASHVSR_OUT_CRF`, default 12 — visually transparent) so the path has exactly one high-quality encode, then muxes losslessly. The patch is idempotent, reversible, and fail-soft: if upstream refactors, it declines to apply and you fall back to upstream's 8-bit output with a warning. Details in [`prototype/flashvsr/README.md`](prototype/flashvsr/README.md).
+
+**Scale handling and supersampling.** FlashVSR takes a scale *multiplier* rather than a target height, so `FLASHVSR_SCALE=auto` (default) derives what's needed and clamps it up to `FLASHVSR_MIN_SCALE` (default **2.0**). For 720p→1080p that means generating at 1440p and downscaling — which both keeps the model near its trained 4× regime and, more importantly, **attenuates shimmer**: per-frame hallucination is high-frequency and uncorrelated between frames, so downscaling averages exactly that component away (the same principle as supersampled anti-aliasing). Costs ~1.8× the pixels (slower, more VRAM — the most likely OOM cause on 16GB; enable `FLASHVSR_TILE_DIT=true` if so) plus one near-transparent corrective re-encode. Set `FLASHVSR_MIN_SCALE=1` for exact-size output and a lossless mux instead. If dimensions ever miss the target, the encoder detects it and resizes rather than shipping the wrong resolution.
+
+> **Status:** built against a close read of upstream's source and tested locally for segmentation, resume, dimension handling and the HQ writer — but **not yet run end-to-end on a GPU**. Smoke-test a short clip before a long run.
 
 ### Estimated total upscale time (1 hour, 25fps, 4060 Ti 16GB)
 
@@ -279,7 +309,7 @@ Model:
                             RRDB: nomos8k (default), lsdirplus, lsdir, ultrasharp, realesrgan
                             Transformer: atdjpg, nomos8kschat, hat, nomos8kdat
                             Temporal: basicvsr
-                            Diffusion VSR: seedvr2 (separate install — highest quality, slow)
+                            Diffusion VSR: seedvr2, flashvsr (separate installs)
 
 Pre-processing:
   --prefilter LEVEL         none, light (default), medium, heavy

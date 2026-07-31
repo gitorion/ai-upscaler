@@ -33,6 +33,14 @@ SEEDVR2_REPO="$SEEDVR2_DIR/repo"
 SEEDVR2_CLI="$SEEDVR2_REPO/inference_cli.py"
 SEEDVR2_MODEL_DIR="$MODEL_DIR/SEEDVR2"
 
+# FlashVSR (streaming diffusion VSR) also runs in its OWN venv (pinned torch 2.6.0+cu124
+# plus a CUDA-compiled Block-Sparse-Attention). Install with prototype/flashvsr/setup.sh.
+FLASHVSR_DIR="$SCRIPT_DIR/flashvsr"
+FLASHVSR_VENV="$FLASHVSR_DIR/venv"
+FLASHVSR_REPO="$FLASHVSR_DIR/repo"
+FLASHVSR_CLI="$FLASHVSR_REPO/infer.py"
+FLASHVSR_MODEL_DIR="$MODEL_DIR/FLASHVSR/FlashVSR-v1.1"
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 TILE_SIZE="auto"
 TILE_SIZE_EXPLICIT=false
@@ -49,6 +57,7 @@ KEEP_TEMP=false
 UPSCALE_SOURCE=""
 IS_TEMPORAL=false
 IS_SEEDVR2=false
+IS_FLASHVSR=false
 TEMPORAL_WINDOW="auto"
 SPYNET_PATH=""
 
@@ -57,16 +66,38 @@ SPYNET_PATH=""
 # environment variable, e.g.:  SEEDVR2_SEGMENT_SECONDS=60 ./upscale_video.sh -i x.mkv -r 1080p -m seedvr2
 # (the ${VAR:-default} form below is what makes env overrides take effect).
 SEEDVR2_MODEL_FILE="${SEEDVR2_MODEL_FILE:-seedvr2_ema_3b_fp8_e4m3fn.safetensors}"  # 3B FP8 — fits 16GB with swap
-SEEDVR2_BATCH="${SEEDVR2_BATCH:-13}"            # frames/batch (4n+1); higher = better temporal consistency + more VRAM
-SEEDVR2_BLOCKS_SWAP="${SEEDVR2_BLOCKS_SWAP:-16}"      # transformer blocks offloaded to CPU RAM (VRAM saver)
+SEEDVR2_BATCH="${SEEDVR2_BATCH:-21}"            # frames/batch (MUST be 4n+1: 1,5,9,13,17,21,25...).
+                            # This is the single most important knob for motion quality. Each batch
+                            # generates its detail independently, so the batch length IS the window
+                            # of temporal context. At 13 (~0.5s @25fps) consecutive batches disagree
+                            # during movement — the model re-invents texture on moving surfaces,
+                            # which reads as crawling/shimmer, while static shots (where successive
+                            # batches see near-identical input) look excellent. 21 (~0.85s) widens
+                            # that window; upstream's guidance is to match batch to shot length.
+                            # Costs VRAM — paid for by the higher blocks_to_swap below. Next step
+                            # up is 25 if you have headroom.
+SEEDVR2_BLOCKS_SWAP="${SEEDVR2_BLOCKS_SWAP:-32}"      # transformer blocks offloaded to CPU RAM (VRAM saver).
+                            # Raised 16→32 (max for the 3B model) to fund the larger batch above.
+                            # Trades speed for VRAM: more CPU<->GPU traffic per step, so expect a
+                            # slower run. Needs the 32GB system RAM (offload lands in RAM, not VRAM).
 SEEDVR2_VAE_ENC_TILE="${SEEDVR2_VAE_ENC_TILE:-1024}"   # VAE encode tile px
 SEEDVR2_VAE_DEC_TILE="${SEEDVR2_VAE_DEC_TILE:-768}"    # VAE decode tile px (1024 OOMs in decode on 16GB; 768 is the sweet spot)
-SEEDVR2_TEMPORAL_OVERLAP="${SEEDVR2_TEMPORAL_OVERLAP:-0}"  # frames blended between batches/chunks. Default 0
+SEEDVR2_TEMPORAL_OVERLAP="${SEEDVR2_TEMPORAL_OVERLAP:-0}"  # frames blended between batches/chunks. Held at 0
                             # (the CLI's own default): blending two batches' differing generations
-                            # creates a faint "ghost" double-image on static areas during motion.
-                            # Raise (e.g. 3) only if you see chunk-boundary seams instead.
-SEEDVR2_CHUNK="${SEEDVR2_CHUNK:-250}"           # streaming chunk size — keeps system RAM flat vs clip length (REQUIRED
+                            # creates a faint "ghost" double-image on static areas during motion —
+                            # confirmed by A/B on a real 480p source.
+                            # DELIBERATELY UNCHANGED while BATCH moves 13->21, so the batch change is
+                            # testable in isolation. Note the 0 verdict was reached on NOISY 480p, not
+                            # clean HD, so it is the least-validated default for this content class.
+                            # If, after the batch increase, you still see discontinuities on motion —
+                            # a repeating "jump" roughly every BATCH frames rather than an all-over
+                            # shimmer — that is a boundary artifact: try 2, then 3.
+SEEDVR2_CHUNK="${SEEDVR2_CHUNK:-252}"           # streaming chunk size — keeps system RAM flat vs clip length (REQUIRED
                             # for long clips; whole-clip load OOM-kills). 0 = load all (short only).
+                            # 252 = 21 x 12, i.e. an exact multiple of SEEDVR2_BATCH. Keeping these
+                            # aligned means every batch in a chunk is full-length; a ragged final
+                            # batch is precisely the case upstream documents temporal_overlap as
+                            # compensating for. If you change BATCH, re-align this (e.g. 25 -> 250).
 # Speed optimizations that are LOSSLESS (identical output, just faster) — on by default.
 # torch.compile fuses GPU kernels via Triton (already installed); does not change the math.
 SEEDVR2_COMPILE="${SEEDVR2_COMPILE:-true}"        # compile the DiT (stable shapes — clean ~20-40% win)
@@ -85,6 +116,51 @@ SEEDVR2_ATTENTION="${SEEDVR2_ATTENTION:-auto}"
 # losslessly concatenated. --resume skips already-finished segments. Larger = fewer concat seams
 # but coarser checkpoints (lose more on a crash); smaller = finer checkpoints but more seams.
 SEEDVR2_SEGMENT_SECONDS="${SEEDVR2_SEGMENT_SECONDS:-300}"   # 5 min. Set 0 to disable segmentation (single-shot regardless of length).
+
+# ── FlashVSR settings (tuned for RTX 4060 Ti 16GB) ───────────────────────────
+# Streaming diffusion VSR. Same env-override convention as the SeedVR2 block above.
+# Modes:  full      = Wan2.1 VAE, best quality, most VRAM (~14GB for 2s of 720p untiled)
+#         tiny      = TCD VAE, balanced, lower VRAM
+#         tiny-long = TCD VAE + streaming inference, for long clips
+FLASHVSR_MODE="${FLASHVSR_MODE:-full}"
+FLASHVSR_TILE_VAE="${FLASHVSR_TILE_VAE:-true}"    # tiled VAE decode — needed for 'full' on 16GB
+FLASHVSR_TILE_DIT="${FLASHVSR_TILE_DIT:-false}"   # tiled DiT — the big VRAM saver, but tiling the
+                            # transformer is also the most likely source of seam artifacts, so it is
+                            # OFF for quality. NOTE: with supersampling (MIN_SCALE 2.0) the model now
+                            # works at 1440p rather than 1080p for a 720p source — ~1.8x the pixels —
+                            # so 16GB may OOM. If it does, set this true (first choice), or lower
+                            # FLASHVSR_MIN_SCALE to 1. Smoke-test a short clip to find out cheaply.
+FLASHVSR_TILE_SIZE="${FLASHVSR_TILE_SIZE:-256}"   # upstream default; larger = fewer seams, more VRAM
+FLASHVSR_TILE_OVERLAP="${FLASHVSR_TILE_OVERLAP:-32}"  # raised 24->32: blend width between tiles. Cheap
+                            # (overlap area only) and directly reduces visible tile seams — the same
+                            # reasoning that took TILE_PAD 32->64 on the spandrel path.
+FLASHVSR_DTYPE="${FLASHVSR_DTYPE:-bf16}"          # bf16 | fp16 | fp32
+FLASHVSR_COLOR_FIX="${FLASHVSR_COLOR_FIX:-true}"  # post-hoc colour correction toward the source —
+                            # fidelity-preserving, counters the colour drift diffusion models exhibit.
+FLASHVSR_SCALE="${FLASHVSR_SCALE:-auto}"          # 'auto' derives the ratio needed to hit the target
+                            # height, then clamps it up to FLASHVSR_MIN_SCALE below. Pin a float to
+                            # override entirely (a fixed value is unsafe across mixed source
+                            # resolutions — 2.0 on a 480p source undershoots a 1080p target).
+FLASHVSR_MIN_SCALE="${FLASHVSR_MIN_SCALE:-2.0}"   # floor for 'auto'. Two reasons, both aimed at motion:
+                            #  1. Supersampling. 720p->1080p only needs 1.5x; generating at 2x (1440p)
+                            #     and downscaling averages neighbouring pixels. Per-frame hallucination
+                            #     is high-frequency and uncorrelated between frames, so that downscale
+                            #     attenuates exactly the component that reads as shimmer (same
+                            #     principle as supersampled anti-aliasing).
+                            #  2. In-distribution. FlashVSR is trained as a 4x restorer and its own
+                            #     CLI defaults to 2.0; asking for 1.5x runs it well below its design
+                            #     point.
+                            # Costs ~1.8x the pixels of a 1.5x run (slower, more VRAM) and forces one
+                            # corrective re-encode from the 10-bit intermediate rather than a stream
+                            # copy — near-transparent at these CRFs. Set to 1 to disable (exact-size
+                            # output, lossless mux, but no supersampling benefit).
+# Output quality of FlashVSR's own writer. Upstream hardcodes 8-bit H.264 CRF 20 even at its max
+# --quality 10, which would cap this pipeline before our encoder runs. prototype/flashvsr/setup.sh
+# patches in a 10-bit x265 writer enabled by these two vars. If the patch didn't apply, they are
+# simply ignored and you get upstream's 8-bit output (still works — just lower quality).
+FLASHVSR_OUT_CRF="${FLASHVSR_OUT_CRF:-12}"        # visually transparent; this IS the deliverable encode
+FLASHVSR_OUT_PRESET="${FLASHVSR_OUT_PRESET:-medium}"
+FLASHVSR_SEGMENT_SECONDS="${FLASHVSR_SEGMENT_SECONDS:-300}"  # same resumability rationale as SeedVR2; 0 disables
 
 # ── Single-frame model registry (spandrel) — all 4x ──────────────────────────
 declare -A MODEL_FILES=(
@@ -176,6 +252,12 @@ Model selection (-m / --model):
               resumable (--resume), so full episodes are practical if you have the time.
               Generative: can fabricate fine detail (watch fidelity).
               Separate install: prototype/seedvr2/setup.sh (own venv, weights auto-DL).
+  flashvsr    FlashVSR — streaming one-step diffusion (CVPR 2026). Built for temporal
+              stability on real footage: designed around long clips rather than short
+              batches, so it targets the crawling/shimmer that batch-based VSR shows on
+              motion. Long files auto-segmented + resumable (--resume), same as seedvr2.
+              Separate install: prototype/flashvsr/setup.sh (own venv, compiles CUDA
+              kernels — allow 10-40 min; weights ~several GB).
 
 Pre-processing (applied before AI upscaling to clean degraded sources):
   --prefilter LEVEL         none, light (default), medium, heavy
@@ -239,6 +321,9 @@ Examples:
 
   # Diffusion VSR — biggest quality jump on low-res clips (slow; short clips)
   $0 -i clip.mkv -r 1080p -m seedvr2
+
+  # Streaming diffusion VSR — better temporal stability on real footage in motion
+  $0 -i episode.mkv -r 1080p -m flashvsr
 
   # Resume an interrupted run
   $0 -i film.mkv -r 1080p --resume
@@ -422,6 +507,29 @@ select_model() {
             exit 1
         fi
         print_info "Model: seedvr2  (${SEEDVR2_MODEL_FILE})  [diffusion VSR — separate venv]"
+        return
+    fi
+
+    # FlashVSR (streaming diffusion VSR) — also its own venv + standalone CLI
+    if [[ "$MODEL_KEY" == "flashvsr" ]]; then
+        IS_FLASHVSR=true
+        IS_TEMPORAL=false
+        if [[ ! -f "$FLASHVSR_CLI" ]]; then
+            print_error "FlashVSR not installed: $FLASHVSR_CLI not found"
+            print_error "Install it first:  cd <repo>/prototype/flashvsr && ./setup.sh"
+            exit 1
+        fi
+        if [[ ! -x "$FLASHVSR_VENV/bin/python3" ]]; then
+            print_error "FlashVSR venv missing: $FLASHVSR_VENV"
+            print_error "Run prototype/flashvsr/setup.sh to create it"
+            exit 1
+        fi
+        if [[ ! -d "$FLASHVSR_MODEL_DIR" ]]; then
+            print_error "FlashVSR weights not found: $FLASHVSR_MODEL_DIR"
+            print_error "Run prototype/flashvsr/setup.sh to download them"
+            exit 1
+        fi
+        print_info "Model: flashvsr  (mode ${FLASHVSR_MODE})  [streaming diffusion VSR — separate venv]"
         return
     fi
 
@@ -1385,9 +1493,13 @@ upscale_video() {
     local output_file="$1"
     local frames_dir="$TEMP_DIR/frames"
 
-    # SeedVR2 runs in its own venv and produces a finished video, not PNG frames.
+    # The diffusion engines run in their own venvs and produce a finished video, not PNG frames.
     if [[ "$IS_SEEDVR2" == true ]]; then
         upscale_seedvr2 "$output_file"
+        return
+    fi
+    if [[ "$IS_FLASHVSR" == true ]]; then
+        upscale_flashvsr "$output_file"
         return
     fi
 
@@ -1517,7 +1629,8 @@ upscale_seedvr2() {
     # Long files → segment for resumability (a multi-day single run can't survive any interruption).
     local dur_int=${DURATION%.*}
     if [[ "$SEEDVR2_SEGMENT_SECONDS" -gt 0 && "${dur_int:-0}" -gt "$SEEDVR2_SEGMENT_SECONDS" ]]; then
-        seedvr2_segmented "$feed" "$output_file"
+        vsr_segmented "$feed" "$output_file" seedvr2_infer "$SEEDVR2_SEGMENT_SECONDS" \
+            "seedvr2_segments" "seedvr2_concat.mkv" "SeedVR2"
         return
     fi
 
@@ -1537,13 +1650,126 @@ upscale_seedvr2() {
     encode_output "$output_file" "$raw_video"
 }
 
-# Auto-segmented SeedVR2 for long files: split → upscale each segment atomically → concat → mux.
+# Core FlashVSR inference: one input video → one upscaled video.
+#
+# Two things differ from SeedVR2 and are handled here:
+#  1. Scale, not target height. FlashVSR takes a float multiplier, so we derive the exact ratio
+#     that lands on OUTPUT_HEIGHT. It pads to a multiple of 128 internally but crops back to
+#     round(w*scale) x round(h*scale), so the result hits the target exactly and the final mux
+#     stays a lossless stream copy.
+#  2. Output writer. Upstream hardcodes 8-bit H.264 CRF 20 even at --quality 10. setup.sh patches
+#     in a 10-bit x265 writer that these env vars drive; unpatched installs ignore them.
+flashvsr_infer() {
+    local in_video="$1" out_video="$2"
+
+    # Derive the scale factor from the actual source height unless pinned.
+    local scale="$FLASHVSR_SCALE"
+    if [[ "$scale" == "auto" ]]; then
+        local src_h
+        src_h=$(ffprobe -v error -select_streams v:0 -show_entries stream=height \
+                -of csv=p=0 "$in_video" 2>/dev/null | head -1)
+        if [[ -z "$src_h" || "$src_h" -le 0 ]] 2>/dev/null; then
+            print_error "FlashVSR: could not read source height from $in_video"
+            exit 1
+        fi
+        # Ratio needed to reach the target, clamped up to the supersampling floor. Anything above
+        # the exact ratio is downscaled to target by encode_output's dimension guard.
+        scale=$(awk -v t="$OUTPUT_HEIGHT" -v s="$src_h" -v m="$FLASHVSR_MIN_SCALE" \
+                'BEGIN{r=t/s; if (r<m) r=m; printf "%.6f", r}')
+        local exact_ratio
+        exact_ratio=$(awk -v t="$OUTPUT_HEIGHT" -v s="$src_h" 'BEGIN{printf "%.3f", t/s}')
+        if awk -v r="$exact_ratio" -v m="$FLASHVSR_MIN_SCALE" 'BEGIN{exit !(r<m)}'; then
+            print_info "FlashVSR: target needs ${exact_ratio}x — generating at ${scale}x and downscaling (supersampling)"
+        fi
+    fi
+
+    local -a opts=()
+    [[ "$FLASHVSR_TILE_VAE" == true ]] && opts+=(--tile-vae)
+    [[ "$FLASHVSR_TILE_DIT" == true ]] && opts+=(--tile-dit)
+    if [[ "$FLASHVSR_TILE_VAE" == true || "$FLASHVSR_TILE_DIT" == true ]]; then
+        opts+=(--tile-size "$FLASHVSR_TILE_SIZE" --overlap "$FLASHVSR_TILE_OVERLAP")
+    fi
+    [[ "$FLASHVSR_COLOR_FIX" == true ]] && opts+=(--color-fix)
+
+    # NOTE: --keep-audio is deliberately NOT passed. We extract and mux audio ourselves
+    # (lossless), and that flag routes through a different, lossy writer upstream.
+    #
+    # env is used rather than export because upstream reads a hyphenated variable name
+    # ("FLASHVSR-Pro_MODEL_PATH"), which is not a valid shell identifier.
+    env "FLASHVSR-Pro_MODEL_PATH=$FLASHVSR_MODEL_DIR" \
+        AIUPSCALER_HQ_OUT=1 \
+        AIUPSCALER_HQ_CRF="$FLASHVSR_OUT_CRF" \
+        AIUPSCALER_HQ_PRESET="$FLASHVSR_OUT_PRESET" \
+        "$FLASHVSR_VENV/bin/python3" "$FLASHVSR_CLI" \
+            -i "$in_video" \
+            -o "$out_video" \
+            --mode "$FLASHVSR_MODE" \
+            --scale "$scale" \
+            --dtype "$FLASHVSR_DTYPE" \
+            --quality 10 \
+            "${opts[@]}"
+}
+
+upscale_flashvsr() {
+    local output_file="$1"
+    local raw_video="$TEMP_DIR/flashvsr_raw.mkv"
+    local feed="$UPSCALE_SOURCE"
+
+    # Same de-anamorphize-up-front rationale as SeedVR2: reconstruct detail at correct
+    # geometry rather than stretching (and softening) it afterwards.
+    if [[ "$INPUT_SAR" != "1:1" && -n "$INPUT_SAR" && "$INPUT_SAR" != "N/A" ]]; then
+        local square="$TEMP_DIR/flashvsr_square.mkv"
+        if [[ "$RESUME" == true && -f "$square" ]]; then
+            print_info "Resume: reusing de-anamorphized source"
+            feed="$square"
+        else
+            print_info "FlashVSR: de-anamorphizing source to square pixels (SAR ${INPUT_SAR})"
+            ffmpeg -i "$feed" \
+                -vf "scale=w='trunc(ih*dar/2)*2':h=ih:flags=lanczos,setsar=1" \
+                -an -sn -c:v libx264 -qp 0 -pix_fmt yuv420p \
+                "$square" -y -loglevel error \
+                && feed="$square" \
+                || print_warning "De-anamorphize failed — feeding original; final encode still corrects AR"
+        fi
+    fi
+
+    print_info "Model: flashvsr (mode ${FLASHVSR_MODE})  |  target height: ${OUTPUT_HEIGHT}px  |  scale: ${FLASHVSR_SCALE}  |  Prefilter: ${PREFILTER}"
+    print_info "Output writer: x265 10-bit crf ${FLASHVSR_OUT_CRF} (this is the deliverable encode — muxed on losslessly)"
+    print_warning "First run loads several GB of weights and compiles kernels — the first segment is slower."
+
+    local dur_int=${DURATION%.*}
+    if [[ "$FLASHVSR_SEGMENT_SECONDS" -gt 0 && "${dur_int:-0}" -gt "$FLASHVSR_SEGMENT_SECONDS" ]]; then
+        vsr_segmented "$feed" "$output_file" flashvsr_infer "$FLASHVSR_SEGMENT_SECONDS" \
+            "flashvsr_segments" "flashvsr_concat.mkv" "FlashVSR"
+        return
+    fi
+
+    if [[ "$RESUME" == true && -f "$raw_video" ]]; then
+        print_info "Resume: reusing existing FlashVSR output ($raw_video)"
+    else
+        print_info "Starting FlashVSR streaming diffusion upscaling..."
+        flashvsr_infer "$feed" "$raw_video"
+        [[ -f "$raw_video" ]] || { print_error "FlashVSR produced no output — see errors above."; exit 1; }
+    fi
+
+    print_success "Upscaling complete"
+    encode_output "$output_file" "$raw_video"
+}
+
+# Auto-segmented diffusion VSR for long files: split → upscale each segment atomically → concat → mux.
 # Each segment's output is written to a .part file and only renamed on success, so an interrupted
 # run never leaves a half-done segment that --resume would wrongly skip.
-seedvr2_segmented() {
-    local feed="$1" output_file="$2"
-    local seg_dir="$TEMP_DIR/seedvr2_segments"
-    local concat_raw="$TEMP_DIR/seedvr2_concat.mkv"
+#
+# Engine-agnostic: the caller passes the inference function to invoke per segment, so SeedVR2 and
+# FlashVSR share this resumability logic instead of duplicating it. Per-engine temp directory names
+# are passed in too, which keeps each engine's --resume state separate (and preserves SeedVR2's
+# existing paths exactly, so an in-flight SeedVR2 run can still be resumed after this refactor).
+#   $1 feed  $2 output_file  $3 infer_fn  $4 segment_seconds  $5 seg_dir_name  $6 concat_name  $7 label
+vsr_segmented() {
+    local feed="$1" output_file="$2" infer_fn="$3" seg_seconds="$4"
+    local seg_dir="$TEMP_DIR/$5"
+    local concat_raw="$TEMP_DIR/$6"
+    local label="$7"
     mkdir -p "$seg_dir"
 
     # 1. Split the feed into video-only segments (lossless stream copy; cuts snap to keyframes —
@@ -1553,17 +1779,17 @@ seedvr2_segmented() {
         print_info "Resume: reusing existing input segments"
     else
         rm -f "$seg_dir"/in_*.mkv
-        print_info "Segmenting source into ${SEEDVR2_SEGMENT_SECONDS}s pieces..."
+        print_info "Segmenting source into ${seg_seconds}s pieces..."
         ffmpeg -i "$feed" -map 0:v -c copy -f segment \
-            -segment_time "$SEEDVR2_SEGMENT_SECONDS" -reset_timestamps 1 \
+            -segment_time "$seg_seconds" -reset_timestamps 1 \
             "$seg_dir/in_%04d.mkv" -y -loglevel error
     fi
 
     local -a segs=("$seg_dir"/in_*.mkv)
     local total=${#segs[@]}
     [[ -f "${segs[0]}" ]] || { print_error "Segmentation produced no segments"; exit 1; }
-    print_info "SeedVR2: ${total} segments of ~${SEEDVR2_SEGMENT_SECONDS}s each (auto-segmented for resumability)"
-    print_warning "Long SeedVR2 run: expect DAYS of compute (~4-7 s/frame). It is fully resumable —"
+    print_info "${label}: ${total} segments of ~${seg_seconds}s each (auto-segmented for resumability)"
+    print_warning "Long ${label} run: expect a LOT of compute. It is fully resumable —"
     print_warning "if interrupted, re-run the SAME command with --resume to skip finished segments."
     print_warning "Keep plenty of free disk for temp segments; --prefilter none avoids a large FFV1 intermediate."
 
@@ -1580,13 +1806,13 @@ seedvr2_segmented() {
             continue
         fi
         print_info "Segment ${i}/${total}: upscaling $(basename "$seg")..."
-        seedvr2_infer "$seg" "$part"
+        "$infer_fn" "$seg" "$part"
         [[ -f "$part" ]] || { print_error "Segment ${i} produced no output — see errors above."; exit 1; }
         mv -f "$part" "$out"   # atomic: only a complete segment counts as done
         done_count=$((done_count + 1))
     done
 
-    # 3. Concat the upscaled segments losslessly (all share SeedVR2's HEVC params).
+    # 3. Concat the upscaled segments losslessly (all share the engine's identical HEVC params).
     print_info "Concatenating ${done_count} upscaled segments..."
     local list="$seg_dir/concat.txt"
     : > "$list"
@@ -1628,6 +1854,24 @@ encode_output() {
     local lossless_copy=false
     if [[ -n "$video_input" && "$SHARPEN" == false ]]; then
         lossless_copy=true
+        # A stream copy keeps whatever dimensions the engine produced. That is what we want ONLY
+        # if they already match the target — otherwise we would silently ship a wrong-sized file.
+        # (FlashVSR takes a scale multiplier rather than a target height, so its output depends on
+        # rounding; SeedVR2 is told the height directly. Verify either way and fall back to the
+        # re-encode path below, which resizes to exact dimensions, if they disagree.)
+        local got_w got_h
+        got_w=$(ffprobe -v error -select_streams v:0 -show_entries stream=width  -of csv=p=0 "$video_input" 2>/dev/null | head -1)
+        got_h=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_input" 2>/dev/null | head -1)
+        if [[ -n "$got_w" && -n "$got_h" ]]; then
+            if [[ "$got_w" != "$OUTPUT_WIDTH" || "$got_h" != "$OUTPUT_HEIGHT" ]]; then
+                print_warning "Upscaled video is ${got_w}x${got_h} but target is ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}"
+                print_warning "Re-encoding to correct the size (costs one extra encode)."
+                lossless_copy=false
+            fi
+        else
+            print_warning "Could not read upscaled dimensions — re-encoding to be safe."
+            lossless_copy=false
+        fi
     fi
 
     # Primary input: finished video, or the upscaled PNG sequence (PNGs carry no fps → fps.txt).
@@ -1843,9 +2087,10 @@ interactive_setup() {
     echo ""
     echo -e "  ${GREEN}Diffusion VSR${NC} (highest quality on low-res sources — but slow, short clips)"
     echo "  16) seedvr2      — Reconstructs detail; biggest jump on low-res/compressed (~4-7 s/frame)"
+    echo "  17) flashvsr     — Streaming VSR; better temporal stability on real footage in motion"
     echo ""
     while true; do
-        read -rp "Choose [1-16, default=1]: " model_choice
+        read -rp "Choose [1-17, default=1]: " model_choice
         local selected_key=""
         case "${model_choice:-1}" in
             1)  selected_key="spanmedium"   ;;
@@ -1864,12 +2109,18 @@ interactive_setup() {
             14) selected_key="nomos8kdat"   ;;
             15) selected_key="basicvsr"     ;;
             16) selected_key="seedvr2"      ;;
+            17) selected_key="flashvsr"     ;;
             *) echo "  Invalid choice, try again."; continue ;;
         esac
-        # Validate availability. SeedVR2 lives in its own venv (no .pth); check the CLI.
+        # Validate availability. The diffusion engines live in their own venvs (no .pth); check the CLI.
         if [[ "$selected_key" == "seedvr2" ]]; then
             if [[ ! -f "$SEEDVR2_CLI" || ! -x "$SEEDVR2_VENV/bin/python3" ]]; then
                 echo -e "  ${RED}SeedVR2 not installed.${NC} Run: prototype/seedvr2/setup.sh"
+                continue
+            fi
+        elif [[ "$selected_key" == "flashvsr" ]]; then
+            if [[ ! -f "$FLASHVSR_CLI" || ! -x "$FLASHVSR_VENV/bin/python3" ]]; then
+                echo -e "  ${RED}FlashVSR not installed.${NC} Run: prototype/flashvsr/setup.sh"
                 continue
             fi
         else
@@ -2013,6 +2264,10 @@ if [[ "$RESUME" == false ]]; then
     rm -f  "$TEMP_DIR/seedvr2_square.mkv"
     rm -f  "$TEMP_DIR/seedvr2_concat.mkv"
     rm -rf "$TEMP_DIR/seedvr2_segments"
+    rm -f  "$TEMP_DIR/flashvsr_raw.mkv"
+    rm -f  "$TEMP_DIR/flashvsr_square.mkv"
+    rm -f  "$TEMP_DIR/flashvsr_concat.mkv"
+    rm -rf "$TEMP_DIR/flashvsr_segments"
 fi
 
 mkdir -p "$TEMP_DIR/frames"
