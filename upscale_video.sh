@@ -168,7 +168,11 @@ FLASHVSR_MIN_SCALE="${FLASHVSR_MIN_SCALE:-1}"     # floor for 'auto'. 1 = no sup
 # activations — so a bigger card automatically gets longer segments (less weight-reloading) without
 # hand-tuning. Set an explicit number to pin it.
 FLASHVSR_INPUT_BUDGET_MB="${FLASHVSR_INPUT_BUDGET_MB:-auto}"
-FLASHVSR_MODEL_RESERVE_MB="${FLASHVSR_MODEL_RESERVE_MB:-9000}"  # weights (~7GB in 'full') + activation headroom
+# Weights + peak DiT activations. MEASURED, not guessed: at a 6223MB input tensor the process
+# reached 15.34GB in use and still OOM'd asking for 886MB inside the DiT's GELU — so 'full' mode
+# needs ~11GB beyond the input, not the 9GB first assumed. Overshooting here only costs segment
+# length; undershooting costs a wasted OOM attempt (minutes) on EVERY segment before the bisect.
+FLASHVSR_MODEL_RESERVE_MB="${FLASHVSR_MODEL_RESERVE_MB:-12000}"
 FLASHVSR_BUDGET_SAFETY="${FLASHVSR_BUDGET_SAFETY:-0.9}"         # keep this fraction of what's left
 # If a segment OOMs anyway, that segment is split in half and retried (recursively, up to this
 # depth) rather than failing the run. Only the affected segment pays the cost, and the global
@@ -1761,6 +1765,7 @@ flashvsr_infer() {
     # ("FLASHVSR-Pro_MODEL_PATH"), which is not a valid shell identifier.
     ( cd "$FLASHVSR_REPO" && \
       env "FLASHVSR-Pro_MODEL_PATH=$FLASHVSR_MODEL_DIR" \
+        PYTORCH_CUDA_ALLOC_CONF="${FLASHVSR_ALLOC_CONF:-expandable_segments:True}" \
         AIUPSCALER_HQ_OUT=1 \
         AIUPSCALER_HQ_CRF="$FLASHVSR_OUT_CRF" \
         AIUPSCALER_HQ_PRESET="$FLASHVSR_OUT_PRESET" \
