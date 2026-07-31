@@ -80,6 +80,8 @@ SEEDVR2_BLOCKS_SWAP="${SEEDVR2_BLOCKS_SWAP:-32}"      # transformer blocks offlo
                             # Raised 16→32 (max for the 3B model) to fund the larger batch above.
                             # Trades speed for VRAM: more CPU<->GPU traffic per step, so expect a
                             # slower run. Needs the 32GB system RAM (offload lands in RAM, not VRAM).
+# Ceiling for the OOM-recovery escalation below. 32 is the maximum for the 3B model (36 for 7B).
+SEEDVR2_MAX_BLOCKS_SWAP="${SEEDVR2_MAX_BLOCKS_SWAP:-32}"
 SEEDVR2_VAE_ENC_TILE="${SEEDVR2_VAE_ENC_TILE:-1024}"   # VAE encode tile px
 SEEDVR2_VAE_DEC_TILE="${SEEDVR2_VAE_DEC_TILE:-768}"    # VAE decode tile px (1024 OOMs in decode on 16GB; 768 is the sweet spot)
 SEEDVR2_TEMPORAL_OVERLAP="${SEEDVR2_TEMPORAL_OVERLAP:-0}"  # frames blended between batches/chunks. Held at 0
@@ -294,7 +296,8 @@ Pre-processing (applied before AI upscaling to clean degraded sources):
   --deinterlace             Deinterlace source (for interlaced TV captures etc.)
 
 Output:
-  -o, --output FILE         Output file (default: INPUT_upscaled_RES.mkv)
+  -o, --output FILE         Output file
+                            (default: INPUT_upscaled_RES.mkv, written NEXT TO THE INPUT)
   -q, --quality QUALITY     high (crf 16), medium (crf 20), low (crf 24) [default: high]
   --encode-speed SPEED      Encode speed/quality tradeoff [default: slow]
                               slow       Best quality, slowest encode (default)
@@ -1585,6 +1588,16 @@ upscale_video() {
 # and per-segment paths. Resolves the lossless speed options and runs the standalone CLI.
 seedvr2_infer() {
     local in_video="$1" out_video="$2"
+    # Overridable by the OOM-recovery wrapper below; default to the configured values.
+    local batch="${3:-$SEEDVR2_BATCH}"
+    local swap="${4:-$SEEDVR2_BLOCKS_SWAP}"
+    # Keep the streaming chunk an exact multiple of the batch so no batch is left short (a ragged
+    # final batch is what temporal_overlap exists to paper over, and we run overlap 0).
+    local chunk="$SEEDVR2_CHUNK"
+    if [[ "$batch" -gt 0 && "$chunk" -gt 0 ]]; then
+        chunk=$(( (chunk / batch) * batch ))
+        [[ "$chunk" -lt "$batch" ]] && chunk="$batch"
+    fi
 
     # Lossless speedups (no quality change): torch.compile + chosen attention backend.
     # 'auto' picks flash_attn_2 when flash-attn is importable in the SeedVR2 venv, else sdpa.
@@ -1610,16 +1623,81 @@ seedvr2_infer() {
         --model_dir "$SEEDVR2_MODEL_DIR" \
         --dit_model "$SEEDVR2_MODEL_FILE" \
         --resolution "$OUTPUT_HEIGHT" \
-        --batch_size "$SEEDVR2_BATCH" \
-        --chunk_size "$SEEDVR2_CHUNK" \
+        --batch_size "$batch" \
+        --chunk_size "$chunk" \
         --temporal_overlap "$SEEDVR2_TEMPORAL_OVERLAP" \
         --color_correction lab \
-        --blocks_to_swap "$SEEDVR2_BLOCKS_SWAP" \
+        --blocks_to_swap "$swap" \
         --dit_offload_device cpu \
         --vae_offload_device cpu \
         --vae_encode_tiled --vae_encode_tile_size "$SEEDVR2_VAE_ENC_TILE" \
         --vae_decode_tiled --vae_decode_tile_size "$SEEDVR2_VAE_DEC_TILE" \
         "${speed_opts[@]}"
+}
+
+# Next lower valid batch size. SeedVR2 requires 4n+1 (…21, 17, 13, 9, 5); 5 is upstream's minimum
+# for temporal coherence, and 1 is single-image mode which would defeat the point.
+seedvr2_prev_batch() {
+    local b="$1" n
+    n=$(( (b - 1) / 4 - 1 ))
+    [[ "$n" -lt 1 ]] && n=1
+    echo $(( 4 * n + 1 ))
+}
+
+# Run SeedVR2, and on CUDA OOM step down to a config that fits — cheapest-quality-cost first.
+#
+# The escalation order matters and is NOT the same as FlashVSR's. Here the two levers differ in what
+# they cost:
+#   1. blocks_to_swap ↑ — offloads more transformer blocks to CPU RAM. Costs SPEED only; the maths is
+#      unchanged, so output is bit-identical. Always try this first.
+#   2. batch_size ↓ — fewer frames per batch. Costs QUALITY: the batch length is the model's window
+#      of temporal context, and shrinking it is exactly what causes the motion shimmer we are trying
+#      to fix. Only after (1) is exhausted, and never below 5.
+# (Bisecting the clip — FlashVSR's fix — is useless here: SeedVR2 already streams via chunk_size, so
+# peak VRAM is set by batch size and resolution, not clip length.)
+#
+# The surviving config is remembered for the rest of the run so later segments don't each re-pay a
+# failed attempt.
+SEEDVR2_FIT_BATCH=""
+SEEDVR2_FIT_SWAP=""
+seedvr2_infer_retry() {
+    local in_video="$1" out_video="$2"
+    local batch="${SEEDVR2_FIT_BATCH:-$SEEDVR2_BATCH}"
+    local swap="${SEEDVR2_FIT_SWAP:-$SEEDVR2_BLOCKS_SWAP}"
+    local errlog="${out_video}.err"
+
+    while true; do
+        print_info "SeedVR2: batch ${batch}, blocks_to_swap ${swap}"
+        if seedvr2_infer "$in_video" "$out_video" "$batch" "$swap" 2>&1 | tee "$errlog"; then :; fi
+        if [[ -f "$out_video" ]]; then
+            rm -f "$errlog"
+            SEEDVR2_FIT_BATCH="$batch"; SEEDVR2_FIT_SWAP="$swap"
+            return 0
+        fi
+
+        if ! grep -qiE "out of memory|OutOfMemoryError" "$errlog" 2>/dev/null; then
+            print_error "SeedVR2 failed (not a VRAM error) — see output above."
+            rm -f "$errlog"
+            return 1
+        fi
+        rm -f "$errlog"
+
+        if [[ "$swap" -lt "$SEEDVR2_MAX_BLOCKS_SWAP" ]]; then
+            swap="$SEEDVR2_MAX_BLOCKS_SWAP"
+            print_warning "OOM — raising blocks_to_swap to ${swap} (slower, but output is unchanged)."
+            continue
+        fi
+
+        local lower; lower=$(seedvr2_prev_batch "$batch")
+        if [[ "$lower" -ge "$batch" || "$batch" -le 5 ]]; then
+            print_error "OOM even at batch 5 with maximum block swapping."
+            print_error "Try SEEDVR2_VAE_DEC_TILE=512, or a lower target resolution."
+            return 1
+        fi
+        print_warning "OOM with swap at max — reducing batch ${batch} → ${lower}."
+        print_warning "This shortens the temporal window, so expect weaker motion consistency."
+        batch="$lower"
+    done
 }
 
 upscale_seedvr2() {
@@ -1655,7 +1733,7 @@ upscale_seedvr2() {
     # Long files → segment for resumability (a multi-day single run can't survive any interruption).
     local dur_int=${DURATION%.*}
     if [[ "$SEEDVR2_SEGMENT_SECONDS" -gt 0 && "${dur_int:-0}" -gt "$SEEDVR2_SEGMENT_SECONDS" ]]; then
-        vsr_segmented "$feed" "$output_file" seedvr2_infer "$SEEDVR2_SEGMENT_SECONDS" \
+        vsr_segmented "$feed" "$output_file" seedvr2_infer_retry "$SEEDVR2_SEGMENT_SECONDS" \
             "seedvr2_segments" "seedvr2_concat.mkv" "SeedVR2"
         return
     fi
@@ -1665,7 +1743,7 @@ upscale_seedvr2() {
         print_info "Resume: reusing existing SeedVR2 output ($raw_video)"
     else
         print_info "Starting SeedVR2 diffusion upscaling..."
-        seedvr2_infer "$feed" "$raw_video"
+        seedvr2_infer_retry "$feed" "$raw_video"
         [[ -f "$raw_video" ]] || { print_error "SeedVR2 produced no output — see errors above."; exit 1; }
     fi
 
@@ -2478,8 +2556,12 @@ TEMP_DIR="$TEMP_DIR/$INPUT_SLUG"
 print_info "Temp: $TEMP_DIR"
 
 if [[ -z "$OUTPUT_FILE" ]]; then
+    # Land the result NEXT TO THE INPUT, not in whatever directory the script was invoked from —
+    # otherwise running from the repo clone drops finished files into the source tree.
+    # (batch_upscale.sh always passes -o explicitly, so its output folder is unaffected.)
     BASENAME=$(basename "$INPUT_FILE" | sed 's/\.[^.]*$//')
-    OUTPUT_FILE="${BASENAME}_upscaled_${RESOLUTION}.mkv"
+    INPUT_PARENT=$(cd "$(dirname "$INPUT_FILE")" && pwd)
+    OUTPUT_FILE="$INPUT_PARENT/${BASENAME}_upscaled_${RESOLUTION}.mkv"
 fi
 
 mkdir -p "$TEMP_DIR"
