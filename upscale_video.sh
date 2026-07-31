@@ -1712,12 +1712,29 @@ flashvsr_infer() {
     fi
     [[ "$FLASHVSR_COLOR_FIX" == true ]] && opts+=(--color-fix)
 
+    # Weight lookup is split across two mechanisms upstream, and only one is configurable:
+    #   * the DiT honours the FLASHVSR-Pro_MODEL_PATH env var (set below), but
+    #   * utils/vae_manager.py hardcodes a RELATIVE default_path ("models/FlashVSR-v1.1/...")
+    #     and resolves it against the CWD, ignoring that variable entirely.
+    # So we run from the repo and point that relative path at our shared weights dir with a
+    # symlink. Keeping the weights outside the repo means a re-clone never re-downloads 7GB.
+    mkdir -p "$FLASHVSR_REPO/models"
+    if [[ ! -e "$FLASHVSR_REPO/models/FlashVSR-v1.1" ]]; then
+        ln -sfn "$FLASHVSR_MODEL_DIR" "$FLASHVSR_REPO/models/FlashVSR-v1.1"
+        print_info "Linked $FLASHVSR_REPO/models/FlashVSR-v1.1 → $FLASHVSR_MODEL_DIR"
+    fi
+
+    # Absolutise the paths: we cd into the repo below, so a relative -i/-o would break.
+    [[ "$in_video"  != /* ]] && in_video="$(cd "$(dirname "$in_video")"  && pwd)/$(basename "$in_video")"
+    [[ "$out_video" != /* ]] && out_video="$(cd "$(dirname "$out_video")" && pwd)/$(basename "$out_video")"
+
     # NOTE: --keep-audio is deliberately NOT passed. We extract and mux audio ourselves
     # (lossless), and that flag routes through a different, lossy writer upstream.
     #
     # env is used rather than export because upstream reads a hyphenated variable name
     # ("FLASHVSR-Pro_MODEL_PATH"), which is not a valid shell identifier.
-    env "FLASHVSR-Pro_MODEL_PATH=$FLASHVSR_MODEL_DIR" \
+    ( cd "$FLASHVSR_REPO" && \
+      env "FLASHVSR-Pro_MODEL_PATH=$FLASHVSR_MODEL_DIR" \
         AIUPSCALER_HQ_OUT=1 \
         AIUPSCALER_HQ_CRF="$FLASHVSR_OUT_CRF" \
         AIUPSCALER_HQ_PRESET="$FLASHVSR_OUT_PRESET" \
@@ -1728,7 +1745,7 @@ flashvsr_infer() {
             --scale "$scale" \
             --dtype "$FLASHVSR_DTYPE" \
             --quality 10 \
-            "${opts[@]}"
+            "${opts[@]}" )
 }
 
 # Resolve the input-tensor VRAM budget. 'auto' measures what the card actually has free right now

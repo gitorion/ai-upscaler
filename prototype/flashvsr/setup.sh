@@ -150,6 +150,23 @@ if ! pip check >/dev/null 2>&1; then
     fi
 fi
 
+# ── Link weights into the repo-relative path the VAE loader expects ──────────
+# utils/vae_manager.py hardcodes a RELATIVE default_path ("models/FlashVSR-v1.1/Wan2.1_VAE.pth")
+# resolved against the CWD, and ignores FLASHVSR-Pro_MODEL_PATH (which only covers the DiT).
+# upscale_video.sh runs infer.py from the repo dir, so this symlink makes that path resolve to the
+# shared weights tree — which stays outside the repo so a re-clone never re-downloads 7GB.
+mkdir -p "$FLASHVSR_REPO/models"
+ln -sfn "$FLASHVSR_MODEL_DIR" "$FLASHVSR_REPO/models/FlashVSR-v1.1"
+ok "Linked models/FlashVSR-v1.1 → $FLASHVSR_MODEL_DIR"
+
+for f in Wan2.1_VAE.pth TCDecoder.ckpt LQ_proj_in.ckpt diffusion_pytorch_model_streaming_dmd.safetensors; do
+    if [[ -f "$FLASHVSR_REPO/models/FlashVSR-v1.1/$f" ]]; then
+        ok "  found $f"
+    else
+        warn "  MISSING $f — re-run the weight download or check $FLASHVSR_MODEL_DIR"
+    fi
+done
+
 # ── Quality patch ────────────────────────────────────────────────────────────
 # FlashVSR-Pro hardcodes an 8-bit H.264 CRF-20 writer even at --quality 10, which
 # would cap this pipeline's quality before our encoder runs. This adds an opt-in
