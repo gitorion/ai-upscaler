@@ -66,7 +66,16 @@ SPYNET_PATH=""
 # environment variable, e.g.:  SEEDVR2_SEGMENT_SECONDS=60 ./upscale_video.sh -i x.mkv -r 1080p -m seedvr2
 # (the ${VAR:-default} form below is what makes env overrides take effect).
 SEEDVR2_MODEL_FILE="${SEEDVR2_MODEL_FILE:-seedvr2_ema_3b_fp8_e4m3fn.safetensors}"  # 3B FP8 — fits 16GB with swap
-SEEDVR2_BATCH="${SEEDVR2_BATCH:-21}"            # frames/batch (MUST be 4n+1: 1,5,9,13,17,21,25...).
+SEEDVR2_BATCH="${SEEDVR2_BATCH:-auto}"          # 'auto' = calibrate the LARGEST batch that fits this
+                            # GPU (see seedvr2_calibrate_batch). Costs a few minutes once, then the
+                            # result is cached per resolution+swap and reused by every later run,
+                            # including whole seasons. Pin an integer to skip calibration.
+SEEDVR2_BATCH_MAX="${SEEDVR2_BATCH_MAX:-49}"    # ceiling for that search (49 = 4*12+1 → ~4 probes).
+                            # Raising it past roughly one shot length is counter-productive: a batch
+                            # spanning a scene cut makes the model reconcile two different scenes.
+                            # On 16GB you top out ~1-1.5s of context anyway, well under a shot.
+SEEDVR2_BATCH_FALLBACK="${SEEDVR2_BATCH_FALLBACK:-21}"   # used if calibration can't run
+                            # frames/batch (MUST be 4n+1: 1,5,9,13,17,21,25...).
                             # This is the single most important knob for motion quality. Each batch
                             # generates its detail independently, so the batch length IS the window
                             # of temporal context. At 13 (~0.5s @25fps) consecutive batches disagree
@@ -1635,6 +1644,66 @@ seedvr2_infer() {
         "${speed_opts[@]}"
 }
 
+# Find the LARGEST 4n+1 batch size this GPU can actually run, and cache it.
+#
+# Batch size is the model's window of temporal context and the main lever on motion quality, so we
+# want the biggest one that fits rather than a hand-picked safe value. VRAM here depends on batch
+# size and output resolution — NOT on clip length (chunk_size streams the clip) — so a few seconds
+# of video is a faithful probe for a two-hour job.
+#
+# Binary search over n in batch=4n+1 (~4 probes for the default ceiling of 49). Each probe pays a
+# model load, so this costs a few minutes ONCE; the answer is then cached per resolution+swap under
+# the runtime dir and reused by every later run, including every episode of a season.
+seedvr2_calibrate_batch() {
+    local feed="$1" swap="$2"
+    local cache="$SEEDVR2_DIR/batch_fit_${OUTPUT_HEIGHT}p_swap${swap}.txt"
+
+    if [[ -s "$cache" ]]; then
+        local cached; cached=$(cat "$cache")
+        if [[ "$cached" =~ ^[0-9]+$ && "$cached" -ge 5 ]]; then
+            print_info "SeedVR2: using cached calibrated batch ${cached} (delete $cache to re-probe)" >&2
+            echo "$cached"; return 0
+        fi
+    fi
+
+    local probe="$TEMP_DIR/seedvr2_probe.mkv"
+    local probe_out="$TEMP_DIR/seedvr2_probe_out.mkv"
+    local probe_secs=$(( (SEEDVR2_BATCH_MAX / 25) + 4 ))   # must hold >= BATCH_MAX frames
+    if ! ffmpeg -i "$feed" -t "$probe_secs" -map 0:v -an -sn \
+                -c:v libx264 -qp 0 "$probe" -y -loglevel error 2>/dev/null; then
+        print_warning "Could not cut a calibration clip — using batch ${SEEDVR2_BATCH_FALLBACK}" >&2
+        echo "$SEEDVR2_BATCH_FALLBACK"; return 0
+    fi
+
+    print_info "SeedVR2: calibrating max batch size for ${OUTPUT_HEIGHT}p (a few probe runs, once)..." >&2
+    local lo_n=1 hi_n=$(( (SEEDVR2_BATCH_MAX - 1) / 4 )) best_n=0 mid_n cand
+    while [[ "$lo_n" -le "$hi_n" ]]; do
+        mid_n=$(( (lo_n + hi_n) / 2 ))
+        cand=$(( 4 * mid_n + 1 ))
+        print_info "SeedVR2:   probing batch ${cand}..." >&2
+        rm -f "$probe_out"
+        if seedvr2_infer "$probe" "$probe_out" "$cand" "$swap" >/dev/null 2>&1 && [[ -f "$probe_out" ]]; then
+            best_n="$mid_n"; lo_n=$(( mid_n + 1 ))
+            print_success "SeedVR2:   batch ${cand} fits" >&2
+        else
+            hi_n=$(( mid_n - 1 ))
+            print_info "SeedVR2:   batch ${cand} does not fit" >&2
+        fi
+    done
+    rm -f "$probe" "$probe_out"
+
+    if [[ "$best_n" -lt 1 ]]; then
+        print_warning "SeedVR2: calibration found nothing that fits — using ${SEEDVR2_BATCH_FALLBACK}" >&2
+        echo "$SEEDVR2_BATCH_FALLBACK"; return 0
+    fi
+
+    local best=$(( 4 * best_n + 1 ))
+    mkdir -p "$SEEDVR2_DIR"
+    echo "$best" > "$cache" 2>/dev/null || true
+    print_success "SeedVR2: calibrated max batch = ${best} (~$(awk -v b="$best" 'BEGIN{printf "%.2f", b/25}')s of temporal context), cached" >&2
+    echo "$best"
+}
+
 # Next lower valid batch size. SeedVR2 requires 4n+1 (…21, 17, 13, 9, 5); 5 is upstream's minimum
 # for temporal coherence, and 1 is single-image mode which would defeat the point.
 seedvr2_prev_batch() {
@@ -1662,8 +1731,13 @@ SEEDVR2_FIT_BATCH=""
 SEEDVR2_FIT_SWAP=""
 seedvr2_infer_retry() {
     local in_video="$1" out_video="$2"
-    local batch="${SEEDVR2_FIT_BATCH:-$SEEDVR2_BATCH}"
     local swap="${SEEDVR2_FIT_SWAP:-$SEEDVR2_BLOCKS_SWAP}"
+    local batch="${SEEDVR2_FIT_BATCH:-$SEEDVR2_BATCH}"
+    # Resolve 'auto' once per run; later segments reuse the answer via SEEDVR2_FIT_BATCH.
+    if [[ "$batch" == "auto" ]]; then
+        batch=$(seedvr2_calibrate_batch "$in_video" "$swap")
+        SEEDVR2_FIT_BATCH="$batch"
+    fi
     local errlog="${out_video}.err"
 
     while true; do
@@ -1726,7 +1800,7 @@ upscale_seedvr2() {
         fi
     fi
 
-    print_info "Model: seedvr2 (${SEEDVR2_MODEL_FILE})  |  short-edge: ${OUTPUT_HEIGHT}px  |  batch: ${SEEDVR2_BATCH}  |  chunk: ${SEEDVR2_CHUNK}  |  Prefilter: ${PREFILTER}"
+    print_info "Model: seedvr2 (${SEEDVR2_MODEL_FILE})  |  short-edge: ${OUTPUT_HEIGHT}px  |  batch: ${SEEDVR2_BATCH}$([[ "$SEEDVR2_BATCH" == auto ]] && echo " (calibrating)")  |  chunk: ${SEEDVR2_CHUNK}  |  Prefilter: ${PREFILTER}"
     print_warning "Diffusion VSR is slow (~4-7 s/frame on 16GB)."
     print_warning "First run downloads weights (~3.6GB) to ${SEEDVR2_MODEL_DIR}."
 
@@ -2578,6 +2652,7 @@ if [[ "$RESUME" == false ]]; then
     rm -f  "$TEMP_DIR/seedvr2_raw.mkv"
     rm -f  "$TEMP_DIR/seedvr2_square.mkv"
     rm -f  "$TEMP_DIR/seedvr2_concat.mkv"
+    rm -f  "$TEMP_DIR/seedvr2_probe.mkv" "$TEMP_DIR/seedvr2_probe_out.mkv"
     rm -rf "$TEMP_DIR/seedvr2_segments"
     rm -f  "$TEMP_DIR/flashvsr_raw.mkv"
     rm -f  "$TEMP_DIR/flashvsr_square.mkv"
