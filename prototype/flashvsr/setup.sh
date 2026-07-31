@@ -184,6 +184,16 @@ done
 # FlashVSR-Pro hardcodes an 8-bit H.264 CRF-20 writer even at --quality 10, which
 # would cap this pipeline's quality before our encoder runs. This adds an opt-in
 # 10-bit x265 writer. Non-fatal: unpatched still works, just lower quality.
+# Colour-correction bug fix: the tiled path runs adain colour correction, which uses .view() on a
+# tensor an earlier permute() left non-contiguous. Upstream swallows the exception, so --color-fix
+# silently does nothing — and uncorrected per-tile colour drift shows up as visible tile seams.
+info "Applying colour-fix (.view -> .reshape) patch..."
+if python3 "$SELF_DIR/patch_colorfix.py" "$FLASHVSR_REPO"; then
+    ok "Colour-fix patch active"
+else
+    warn "Colour-fix patch not applied — --color-fix will keep failing silently (run still works)."
+fi
+
 info "Applying HQ (10-bit) output patch to infer.py..."
 if python3 "$SELF_DIR/patch_hq_output.py" "$FLASHVSR_CLI"; then
     ok "HQ output patch active"
