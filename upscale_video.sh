@@ -168,11 +168,12 @@ FLASHVSR_MIN_SCALE="${FLASHVSR_MIN_SCALE:-1}"     # floor for 'auto'. 1 = no sup
 # activations — so a bigger card automatically gets longer segments (less weight-reloading) without
 # hand-tuning. Set an explicit number to pin it.
 FLASHVSR_INPUT_BUDGET_MB="${FLASHVSR_INPUT_BUDGET_MB:-auto}"
-# Weights + peak DiT activations. MEASURED, not guessed: at a 6223MB input tensor the process
-# reached 15.34GB in use and still OOM'd asking for 886MB inside the DiT's GELU — so 'full' mode
-# needs ~11GB beyond the input, not the 9GB first assumed. Overshooting here only costs segment
-# length; undershooting costs a wasted OOM attempt (minutes) on EVERY segment before the bisect.
-FLASHVSR_MODEL_RESERVE_MB="${FLASHVSR_MODEL_RESERVE_MB:-12000}"
+# Weights + activations only — the per-frame tensors are accounted for separately (x2 above).
+# MEASURED: a 375-frame segment OOM'd in VAE decode at 15.45GB in use while holding ~9.3GB of
+# frame tensors, putting the model itself near 6.2GB once --tile-dit caps DiT activations.
+# 9500 leaves margin on that. Overshooting costs segment length; undershooting costs a wasted
+# full-length attempt (~8 min at 45 tiles) on every segment before the bisect rescues it.
+FLASHVSR_MODEL_RESERVE_MB="${FLASHVSR_MODEL_RESERVE_MB:-9500}"
 FLASHVSR_BUDGET_SAFETY="${FLASHVSR_BUDGET_SAFETY:-0.9}"         # keep this fraction of what's left
 # If a segment OOMs anyway, that segment is split in half and retried (recursively, up to this
 # depth) rather than failing the run. Only the affected segment pays the cost, and the global
@@ -1901,7 +1902,10 @@ flashvsr_budget_seconds() {
             sw = int(w * sc + 0.5); sh = int(h * sc + 0.5)
             tw = int((sw + 127) / 128) * 128
             th = int((sh + 127) / 128) * 128
-            per_frame = tw * th * 3 * bpc
+            # x2: the input tensor is held for the whole clip AND the decoded output accumulates
+            # alongside it as tiles are assembled, so peak VRAM carries ~two full-resolution copies.
+            # Measured: 375 frames OOMs in VAE decode at the last tile, 189 frames completes.
+            per_frame = tw * th * 3 * bpc * 2
             if (per_frame <= 0) exit
             frames = (budget * 1048576) / per_frame
             secs = int(frames / f)
