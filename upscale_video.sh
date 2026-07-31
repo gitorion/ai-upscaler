@@ -141,7 +141,10 @@ FLASHVSR_SCALE="${FLASHVSR_SCALE:-auto}"          # 'auto' derives the ratio nee
                             # height, then clamps it up to FLASHVSR_MIN_SCALE below. Pin a float to
                             # override entirely (a fixed value is unsafe across mixed source
                             # resolutions — 2.0 on a 480p source undershoots a 1080p target).
-FLASHVSR_MIN_SCALE="${FLASHVSR_MIN_SCALE:-2.0}"   # floor for 'auto'. Two reasons, both aimed at motion:
+FLASHVSR_MIN_SCALE="${FLASHVSR_MIN_SCALE:-1}"     # floor for 'auto'. 1 = no supersampling (exact target
+                            # size, lossless mux). Raise to 2.0 ONLY if you have VRAM headroom —
+                            # see the note below on why it is off by default on 16GB.
+                            # Supersampling rationale, for when it is affordable:
                             #  1. Supersampling. 720p->1080p only needs 1.5x; generating at 2x (1440p)
                             #     and downscaling averages neighbouring pixels. Per-frame hallucination
                             #     is high-frequency and uncorrelated between frames, so that downscale
@@ -150,10 +153,28 @@ FLASHVSR_MIN_SCALE="${FLASHVSR_MIN_SCALE:-2.0}"   # floor for 'auto'. Two reason
                             #  2. In-distribution. FlashVSR is trained as a 4x restorer and its own
                             #     CLI defaults to 2.0; asking for 1.5x runs it well below its design
                             #     point.
-                            # Costs ~1.8x the pixels of a 1.5x run (slower, more VRAM) and forces one
-                            # corrective re-encode from the 10-bit intermediate rather than a stream
-                            # copy — near-transparent at these CRFs. Set to 1 to disable (exact-size
-                            # output, lossless mux, but no supersampling benefit).
+                            # Costs ~1.8x the pixels of a 1.5x run and forces one corrective re-encode
+                            # from the 10-bit intermediate rather than a stream copy (near-transparent
+                            # at these CRFs). OFF by default because infer.py holds the ENTIRE input
+                            # clip in VRAM before inference (see FLASHVSR_INPUT_BUDGET_MB), so the
+                            # 1.8x frame cost directly shortens how much video fits per invocation.
+# infer.py's prepare_input_tensor() decodes the whole clip, scales+pads every frame to a multiple of
+# 128, and accumulates it ON THE GPU before the model is even loaded. So peak VRAM scales with clip
+# LENGTH, and neither --tile-dit nor --tile-vae helps (those tile the model, not this tensor). The
+# only lever is how much video we hand it per call, which is what the auto-segmentation below sizes.
+# This budget is the ceiling for that input tensor; the rest of the card is left for weights
+# (~7GB in 'full' mode) and activations. Lower it if you still OOM, raise it on a bigger card.
+# 'auto' probes free VRAM at run start and takes everything left after reserving for weights and
+# activations — so a bigger card automatically gets longer segments (less weight-reloading) without
+# hand-tuning. Set an explicit number to pin it.
+FLASHVSR_INPUT_BUDGET_MB="${FLASHVSR_INPUT_BUDGET_MB:-auto}"
+FLASHVSR_MODEL_RESERVE_MB="${FLASHVSR_MODEL_RESERVE_MB:-9000}"  # weights (~7GB in 'full') + activation headroom
+FLASHVSR_BUDGET_SAFETY="${FLASHVSR_BUDGET_SAFETY:-0.9}"         # keep this fraction of what's left
+# If a segment OOMs anyway, that segment is split in half and retried (recursively, up to this
+# depth) rather than failing the run. Only the affected segment pays the cost, and the global
+# segment set is untouched — so --resume stays valid. This is what lets the budget above be
+# optimistic: overshoot self-heals instead of wasting the run.
+FLASHVSR_OOM_RETRY_DEPTH="${FLASHVSR_OOM_RETRY_DEPTH:-3}"
 # Output quality of FlashVSR's own writer. Upstream hardcodes 8-bit H.264 CRF 20 even at its max
 # --quality 10, which would cap this pipeline before our encoder runs. prototype/flashvsr/setup.sh
 # patches in a 10-bit x265 writer enabled by these two vars. If the patch didn't apply, they are
@@ -1710,6 +1731,120 @@ flashvsr_infer() {
             "${opts[@]}"
 }
 
+# Resolve the input-tensor VRAM budget. 'auto' measures what the card actually has free right now
+# and claims everything beyond the model reserve, so segments are as long as the hardware allows.
+flashvsr_resolve_budget() {
+    if [[ "$FLASHVSR_INPUT_BUDGET_MB" != "auto" ]]; then
+        echo "$FLASHVSR_INPUT_BUDGET_MB"
+        return
+    fi
+    local free_mb
+    free_mb=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+    if [[ -z "$free_mb" || "$free_mb" -le 0 ]] 2>/dev/null; then
+        print_warning "Could not read free VRAM — falling back to a conservative 3500MB input budget" >&2
+        echo 3500
+        return
+    fi
+    local budget
+    budget=$(awk -v f="$free_mb" -v r="$FLASHVSR_MODEL_RESERVE_MB" -v s="$FLASHVSR_BUDGET_SAFETY" \
+             'BEGIN{b=(f-r)*s; if (b<512) b=512; printf "%d", b}')
+    print_info "FlashVSR: ${free_mb}MB VRAM free − ${FLASHVSR_MODEL_RESERVE_MB}MB reserved for weights/activations → ${budget}MB input budget" >&2
+    echo "$budget"
+}
+
+# Run inference, and if it dies specifically of CUDA OOM, halve the workload and retry.
+# Splitting the *input clip* is the only lever that reduces peak VRAM here (the whole clip is held
+# on the GPU), so we bisect the segment and concatenate the halves back into the expected output.
+# Halves are cut with an accurate seek and re-encoded LOSSLESSLY (-qp 0), because a stream copy
+# would snap to keyframes and drop or duplicate frames at the boundary.
+flashvsr_infer_retry() {
+    local in_video="$1" out_video="$2" depth="${3:-0}"
+    local errlog="${out_video}.err"
+
+    if flashvsr_infer "$in_video" "$out_video" 2>&1 | tee "$errlog"; then
+        # tee masks the exit status; treat a produced file as success.
+        [[ -f "$out_video" ]] && { rm -f "$errlog"; return 0; }
+    fi
+    [[ -f "$out_video" ]] && { rm -f "$errlog"; return 0; }
+
+    if ! grep -qiE "out of memory|OutOfMemoryError|CUDA error: out of memory" "$errlog" 2>/dev/null; then
+        print_error "FlashVSR failed (not a VRAM error) — see output above."
+        rm -f "$errlog"
+        return 1
+    fi
+    if [[ "$depth" -ge "$FLASHVSR_OOM_RETRY_DEPTH" ]]; then
+        print_error "Still OOM after ${depth} bisections. Lower FLASHVSR_INPUT_BUDGET_MB or raise FLASHVSR_MODEL_RESERVE_MB."
+        rm -f "$errlog"
+        return 1
+    fi
+    rm -f "$errlog"
+
+    local dur half
+    dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in_video" 2>/dev/null | head -1)
+    half=$(awk -v d="$dur" 'BEGIN{printf "%.3f", d/2}')
+    if [[ -z "$dur" ]] || awk -v d="$dur" 'BEGIN{exit !(d < 1.0)}'; then
+        print_error "Segment too short to bisect further (${dur}s) — genuinely out of VRAM."
+        return 1
+    fi
+
+    print_warning "OOM on $(basename "$in_video") — bisecting (depth $((depth + 1))) and retrying..."
+    local base="${out_video%.mkv}"
+    local a="${base}_a.mkv" b="${base}_b.mkv"
+    local ao="${base}_ao.mkv" bo="${base}_bo.mkv"
+
+    ffmpeg -i "$in_video" -t "$half"          -map 0:v -c:v libx264 -qp 0 -an -sn "$a" -y -loglevel error
+    ffmpeg -i "$in_video" -ss "$half"         -map 0:v -c:v libx264 -qp 0 -an -sn "$b" -y -loglevel error
+
+    flashvsr_infer_retry "$a" "$ao" $((depth + 1)) || { rm -f "$a" "$b" "$ao" "$bo"; return 1; }
+    flashvsr_infer_retry "$b" "$bo" $((depth + 1)) || { rm -f "$a" "$b" "$ao" "$bo"; return 1; }
+
+    local list="${base}_concat.txt"
+    printf "file '%s'\nfile '%s'\n" "$ao" "$bo" > "$list"
+    ffmpeg -f concat -safe 0 -i "$list" -c copy "$out_video" -y -loglevel error \
+        || { print_error "Failed to rejoin bisected halves"; rm -f "$a" "$b" "$ao" "$bo" "$list"; return 1; }
+    rm -f "$a" "$b" "$ao" "$bo" "$list"
+    return 0
+}
+
+# How many seconds of this video fit in FLASHVSR_INPUT_BUDGET_MB once scaled and padded?
+# Mirrors infer.py's compute_scaled_and_target_dims(): scale, then round each side UP to a
+# multiple of 128. Prints an integer number of seconds (>=4), or nothing if it can't measure.
+flashvsr_budget_seconds() {
+    local probe_file="$1" budget_mb="$2"
+    local dims fps w h
+    dims=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+           -of csv=p=0 "$probe_file" 2>/dev/null | head -1)
+    w=${dims%%,*}; h=${dims##*,}
+    fps=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
+          -of csv=p=0 "$probe_file" 2>/dev/null | head -1)
+    [[ -z "$w" || -z "$h" || -z "$fps" ]] && return 0
+
+    local scale="$FLASHVSR_SCALE"
+    if [[ "$scale" == "auto" ]]; then
+        scale=$(awk -v t="$OUTPUT_HEIGHT" -v s="$h" -v m="$FLASHVSR_MIN_SCALE" \
+                'BEGIN{r=t/s; if (r<m) r=m; printf "%.6f", r}')
+    fi
+
+    local bytes=2
+    [[ "$FLASHVSR_DTYPE" == "fp32" ]] && bytes=4
+
+    awk -v w="$w" -v h="$h" -v sc="$scale" -v fps="$fps" -v bpc="$bytes" \
+        -v budget="$budget_mb" '
+        BEGIN {
+            if (index(fps, "/") > 0) { split(fps, p, "/"); f = (p[2] != 0) ? p[1]/p[2] : 0 } else { f = fps }
+            if (f <= 0) exit
+            sw = int(w * sc + 0.5); sh = int(h * sc + 0.5)
+            tw = int((sw + 127) / 128) * 128
+            th = int((sh + 127) / 128) * 128
+            per_frame = tw * th * 3 * bpc
+            if (per_frame <= 0) exit
+            frames = (budget * 1048576) / per_frame
+            secs = int(frames / f)
+            if (secs < 4) secs = 4        # floor: below this the per-segment model reload dominates
+            print secs
+        }'
+}
+
 upscale_flashvsr() {
     local output_file="$1"
     local raw_video="$TEMP_DIR/flashvsr_raw.mkv"
@@ -1737,9 +1872,37 @@ upscale_flashvsr() {
     print_info "Output writer: x265 10-bit crf ${FLASHVSR_OUT_CRF} (this is the deliverable encode — muxed on losslessly)"
     print_warning "First run loads several GB of weights and compiles kernels — the first segment is slower."
 
+    # Size segments to VRAM, not to the clock. infer.py holds the whole clip on the GPU at
+    # scaled+padded resolution, so the safe segment length depends on frame geometry — a fixed
+    # number of seconds would OOM at 4K and waste capacity at 480p.
+    local seg_seconds="$FLASHVSR_SEGMENT_SECONDS"
+    local seg_state="$TEMP_DIR/flashvsr_seg_seconds"
+
+    # RESUME SAFETY: the segment length determines how the source was split, so a resumed run MUST
+    # reuse the original value. Free VRAM (and therefore an 'auto' budget) can differ between runs —
+    # re-deriving it could produce a different split whose out_*.mkv files no longer line up with the
+    # in_*.mkv set, silently mixing work from two different segmentations. So it is written once and
+    # read back on resume.
+    if [[ "$RESUME" == true && -s "$seg_state" ]]; then
+        seg_seconds=$(cat "$seg_state")
+        print_info "Resume: reusing the original segment length (${seg_seconds}s) to keep the split identical"
+    else
+        local budget_mb budget_seconds
+        budget_mb=$(flashvsr_resolve_budget)
+        budget_seconds=$(flashvsr_budget_seconds "$feed" "$budget_mb")
+        if [[ -n "$budget_seconds" && "$budget_seconds" -gt 0 ]] 2>/dev/null; then
+            if [[ "$seg_seconds" -le 0 || "$budget_seconds" -lt "$seg_seconds" ]]; then
+                print_info "FlashVSR: that budget fits ~${budget_seconds}s of this video per invocation — using it as the segment length"
+                print_warning "Weights (~7GB) reload once per segment, so shorter segments cost more overhead."
+                seg_seconds="$budget_seconds"
+            fi
+        fi
+        echo "$seg_seconds" > "$seg_state"
+    fi
+
     local dur_int=${DURATION%.*}
-    if [[ "$FLASHVSR_SEGMENT_SECONDS" -gt 0 && "${dur_int:-0}" -gt "$FLASHVSR_SEGMENT_SECONDS" ]]; then
-        vsr_segmented "$feed" "$output_file" flashvsr_infer "$FLASHVSR_SEGMENT_SECONDS" \
+    if [[ "$seg_seconds" -gt 0 && "${dur_int:-0}" -gt "$seg_seconds" ]]; then
+        vsr_segmented "$feed" "$output_file" flashvsr_infer_retry "$seg_seconds" \
             "flashvsr_segments" "flashvsr_concat.mkv" "FlashVSR"
         return
     fi
@@ -1748,7 +1911,7 @@ upscale_flashvsr() {
         print_info "Resume: reusing existing FlashVSR output ($raw_video)"
     else
         print_info "Starting FlashVSR streaming diffusion upscaling..."
-        flashvsr_infer "$feed" "$raw_video"
+        flashvsr_infer_retry "$feed" "$raw_video"
         [[ -f "$raw_video" ]] || { print_error "FlashVSR produced no output — see errors above."; exit 1; }
     fi
 
@@ -2268,6 +2431,7 @@ if [[ "$RESUME" == false ]]; then
     rm -f  "$TEMP_DIR/flashvsr_square.mkv"
     rm -f  "$TEMP_DIR/flashvsr_concat.mkv"
     rm -rf "$TEMP_DIR/flashvsr_segments"
+    rm -f  "$TEMP_DIR/flashvsr_seg_seconds"
 fi
 
 mkdir -p "$TEMP_DIR/frames"

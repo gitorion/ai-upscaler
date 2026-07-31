@@ -84,10 +84,64 @@ All settings are env-overridable per run (see the `FLASHVSR_*` block in `upscale
 | `FLASHVSR_TILE_DIT` | `false` | **First thing to enable if you OOM** — big VRAM saver, some seam risk |
 | `FLASHVSR_TILE_OVERLAP` | `32` | Blend width between tiles (raised from upstream's 24 to soften seams) |
 | `FLASHVSR_SCALE` | `auto` | Ratio needed for the target, clamped up to `MIN_SCALE` |
-| `FLASHVSR_MIN_SCALE` | `2.0` | Supersampling floor — see below. `1` disables |
+| `FLASHVSR_MIN_SCALE` | `1` | Supersampling floor — see below. `2.0` enables it (needs VRAM headroom) |
+| `FLASHVSR_INPUT_BUDGET_MB` | `auto` | VRAM ceiling for the input tensor; sizes the segment length |
+| `FLASHVSR_MODEL_RESERVE_MB` | `9000` | Held back for weights + activations when auto-probing |
+| `FLASHVSR_OOM_RETRY_DEPTH` | `3` | Bisections allowed before giving up on a segment |
 | `FLASHVSR_COLOR_FIX` | `true` | Corrects diffusion colour drift toward the source |
 | `FLASHVSR_OUT_CRF` | `12` | The deliverable encode |
 | `FLASHVSR_SEGMENT_SECONDS` | `300` | `0` disables segmentation |
+
+### VRAM: why segments are short
+
+`infer.py`'s `prepare_input_tensor()` decodes the **entire clip**, scales and pads every frame to a
+multiple of 128, and accumulates it **on the GPU** — before the model is even loaded:
+
+```python
+batch_tensor = process_batch_gpu(batch_buffer, ..., device)
+frames.append(batch_tensor)        # accumulates on GPU
+vid = torch.cat(frames, ...)       # whole clip resident
+```
+
+So peak VRAM scales with clip **length**, and `--tile-dit` / `--tile-vae` do not help — they tile the
+model, not this tensor. `tiny-long` doesn't help either; it streams the inference stage but still
+receives the pre-built tensor. A 4-minute 720p clip at 2× is ~135 GB of tensor and OOMs instantly.
+
+The only lever is how much video is handed over per invocation, so segment length is derived from
+real frame geometry rather than a fixed number of seconds (which would OOM at 4K and waste capacity
+at 480p). Two mechanisms work together:
+
+**1. Probe up front, and maximise.** `FLASHVSR_INPUT_BUDGET_MB=auto` (default) reads free VRAM via
+`nvidia-smi` at run start and claims everything past `FLASHVSR_MODEL_RESERVE_MB`, times a safety
+fraction. Longer segments mean fewer weight reloads, so a bigger card automatically does less
+thrashing with no hand-tuning:
+
+| Free VRAM | Budget | 720p→1080p segment |
+|---|---|---|
+| 16 GB (4060 Ti) | ~6.2 GB | ~19s |
+| 24 GB | ~12.6 GB | ~39s |
+
+Per-frame cost, which sets the segment length for a given budget:
+
+| Job | Padded frame | Per frame |
+|---|---|---|
+| 720p→1080p (`MIN_SCALE=1`) | 1920×1152 | 12.7 MiB |
+| 720p→1080p (`MIN_SCALE=2.0`) | 2560×1536 | 22.5 MiB |
+| 480p→1080p | 1536×1152 | 10.1 MiB |
+| 1080p→2160p | 3840×2176 | 47.8 MiB |
+
+**2. Self-heal on OOM.** Because the probe is deliberately optimistic, a segment can still OOM. When
+that happens the run doesn't die: that segment is bisected and retried (up to
+`FLASHVSR_OOM_RETRY_DEPTH`), and the halves are rejoined into the expected output. Only the affected
+segment pays the cost, and the global segment set is untouched — so `--resume` stays valid. Halves
+are cut with an accurate seek and re-encoded losslessly (`-qp 0`), because a stream copy would snap
+to keyframes and drop or duplicate frames at the boundary. Non-OOM errors fail fast rather than
+pointlessly bisecting.
+
+**Resume safety:** the chosen segment length is written to `temp/<input>/flashvsr_seg_seconds` and
+read back on `--resume`. Free VRAM can differ between runs, so re-deriving it could produce a
+different split whose outputs no longer line up with the existing inputs — silently mixing work from
+two segmentations. Pinning it removes that class of bug entirely.
 
 ### Scale and supersampling
 
