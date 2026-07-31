@@ -124,12 +124,12 @@ SEEDVR2_SEGMENT_SECONDS="${SEEDVR2_SEGMENT_SECONDS:-300}"   # 5 min. Set 0 to di
 #         tiny-long = TCD VAE + streaming inference, for long clips
 FLASHVSR_MODE="${FLASHVSR_MODE:-full}"
 FLASHVSR_TILE_VAE="${FLASHVSR_TILE_VAE:-true}"    # tiled VAE decode — needed for 'full' on 16GB
-FLASHVSR_TILE_DIT="${FLASHVSR_TILE_DIT:-false}"   # tiled DiT — the big VRAM saver, but tiling the
-                            # transformer is also the most likely source of seam artifacts, so it is
-                            # OFF for quality. NOTE: with supersampling (MIN_SCALE 2.0) the model now
-                            # works at 1440p rather than 1080p for a 720p source — ~1.8x the pixels —
-                            # so 16GB may OOM. If it does, set this true (first choice), or lower
-                            # FLASHVSR_MIN_SCALE to 1. Smoke-test a short clip to find out cheaply.
+FLASHVSR_TILE_DIT="${FLASHVSR_TILE_DIT:-true}"    # tile the DiT spatially. ON by default because on
+                            # 16GB the DiT's per-iteration activations at 1080p output exceed VRAM on
+                            # their own: measured 14.8GB in use with an 886MB alloc failing, and that
+                            # figure was IDENTICAL at 375, 189 and 95 frames — i.e. it scales with
+                            # RESOLUTION, not clip length, so segmenting cannot fix it. Tiling can.
+                            # Set false only on a card with headroom (fewer tiles = fewer seams).
 FLASHVSR_TILE_SIZE="${FLASHVSR_TILE_SIZE:-256}"   # upstream default; larger = fewer seams, more VRAM
 FLASHVSR_TILE_OVERLAP="${FLASHVSR_TILE_OVERLAP:-32}"  # raised 24->32: blend width between tiles. Cheap
                             # (overlap area only) and directly reduces visible tile seams — the same
@@ -1686,6 +1686,7 @@ upscale_seedvr2() {
 #     in a 10-bit x265 writer that these env vars drive; unpatched installs ignore them.
 flashvsr_infer() {
     local in_video="$1" out_video="$2"
+    local tile_dit="${3:-$FLASHVSR_TILE_DIT}"   # retry can force this on after a spatial OOM
 
     # Derive the scale factor from the actual source height unless pinned.
     local scale="$FLASHVSR_SCALE"
@@ -1710,8 +1711,8 @@ flashvsr_infer() {
 
     local -a opts=()
     [[ "$FLASHVSR_TILE_VAE" == true ]] && opts+=(--tile-vae)
-    [[ "$FLASHVSR_TILE_DIT" == true ]] && opts+=(--tile-dit)
-    if [[ "$FLASHVSR_TILE_VAE" == true || "$FLASHVSR_TILE_DIT" == true ]]; then
+    [[ "$tile_dit" == true ]] && opts+=(--tile-dit)
+    if [[ "$FLASHVSR_TILE_VAE" == true || "$tile_dit" == true ]]; then
         opts+=(--tile-size "$FLASHVSR_TILE_SIZE" --overlap "$FLASHVSR_TILE_OVERLAP")
     fi
     [[ "$FLASHVSR_COLOR_FIX" == true ]] && opts+=(--color-fix)
@@ -1806,10 +1807,10 @@ flashvsr_resolve_budget() {
 # Halves are cut with an accurate seek and re-encoded LOSSLESSLY (-qp 0), because a stream copy
 # would snap to keyframes and drop or duplicate frames at the boundary.
 flashvsr_infer_retry() {
-    local in_video="$1" out_video="$2" depth="${3:-0}"
+    local in_video="$1" out_video="$2" depth="${3:-0}" tile_dit="${4:-$FLASHVSR_TILE_DIT}"
     local errlog="${out_video}.err"
 
-    if flashvsr_infer "$in_video" "$out_video" 2>&1 | tee "$errlog"; then
+    if flashvsr_infer "$in_video" "$out_video" "$tile_dit" 2>&1 | tee "$errlog"; then
         # tee masks the exit status; treat a produced file as success.
         [[ -f "$out_video" ]] && { rm -f "$errlog"; return 0; }
     fi
@@ -1820,8 +1821,24 @@ flashvsr_infer_retry() {
         rm -f "$errlog"
         return 1
     fi
+    # ESCALATE SPATIALLY FIRST. There are two distinct OOM modes here and they need opposite fixes:
+    #   * prepare_input_tensor() OOM — the whole clip is held on the GPU, so peak scales with LENGTH.
+    #     Bisecting fixes it.
+    #   * DiT OOM (F.gelu / ffn) — per-iteration activations scale with RESOLUTION, not length. VRAM
+    #     use is then identical whether the clip is 375 frames or 95, so bisecting is pure waste.
+    #     --tile-dit is the only lever.
+    # We can't reliably tell them apart from the message, so try the spatial fix once before
+    # bisecting: it is one retry, and it is the only thing that can help the second (harder) mode.
+    if [[ "$tile_dit" != true ]]; then
+        rm -f "$errlog"
+        print_warning "OOM on $(basename "$in_video") — retrying with --tile-dit (spatial tiling) before bisecting..."
+        flashvsr_infer_retry "$in_video" "$out_video" "$depth" true
+        return $?
+    fi
+
     if [[ "$depth" -ge "$FLASHVSR_OOM_RETRY_DEPTH" ]]; then
-        print_error "Still OOM after ${depth} bisections. Lower FLASHVSR_INPUT_BUDGET_MB or raise FLASHVSR_MODEL_RESERVE_MB."
+        print_error "Still OOM with --tile-dit after ${depth} bisections."
+        print_error "Try: FLASHVSR_TILE_SIZE=192 (smaller tiles), or FLASHVSR_MODE=tiny (lighter VAE)."
         rm -f "$errlog"
         return 1
     fi
@@ -1843,8 +1860,8 @@ flashvsr_infer_retry() {
     ffmpeg -i "$in_video" -t "$half"          -map 0:v -c:v libx264 -qp 0 -an -sn "$a" -y -loglevel error
     ffmpeg -i "$in_video" -ss "$half"         -map 0:v -c:v libx264 -qp 0 -an -sn "$b" -y -loglevel error
 
-    flashvsr_infer_retry "$a" "$ao" $((depth + 1)) || { rm -f "$a" "$b" "$ao" "$bo"; return 1; }
-    flashvsr_infer_retry "$b" "$bo" $((depth + 1)) || { rm -f "$a" "$b" "$ao" "$bo"; return 1; }
+    flashvsr_infer_retry "$a" "$ao" $((depth + 1)) "$tile_dit" || { rm -f "$a" "$b" "$ao" "$bo"; return 1; }
+    flashvsr_infer_retry "$b" "$bo" $((depth + 1)) "$tile_dit" || { rm -f "$a" "$b" "$ao" "$bo"; return 1; }
 
     local list="${base}_concat.txt"
     printf "file '%s'\nfile '%s'\n" "$ao" "$bo" > "$list"
