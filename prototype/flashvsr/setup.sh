@@ -114,12 +114,40 @@ if [[ -f "$FLASHVSR_MODEL_DIR/diffusion_pytorch_model_streaming_dmd.safetensors"
     ok "Weights already present in $FLASHVSR_MODEL_DIR"
 else
     info "Downloading FlashVSR v1.1 weights → $FLASHVSR_MODEL_DIR (several GB)..."
-    pip install --upgrade "huggingface_hub[cli]" >/dev/null
-    hf download "$HF_REPO" --local-dir "$FLASHVSR_MODEL_DIR" \
-        || huggingface-cli download "$HF_REPO" --local-dir "$FLASHVSR_MODEL_DIR" \
-        || { err "Weight download failed. Manual fallback:"
-             err "  git lfs install && git clone https://huggingface.co/$HF_REPO $FLASHVSR_MODEL_DIR"
-             exit 1; }
+    # Do NOT `pip install --upgrade huggingface_hub` here: diffsynth pins it to ==0.34.4, and
+    # upgrading silently breaks diffsynth/transformers/tokenizers — which makes infer.py fail to
+    # import. Use whatever version the requirements already pinned; only install if truly absent.
+    if ! python3 -c "import huggingface_hub" &>/dev/null; then
+        info "huggingface_hub not present — installing the diffsynth-compatible pin..."
+        pip install "huggingface_hub==0.34.4"
+    fi
+    cat > "$FLASHVSR_DIR/_dl_weights.py" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id=sys.argv[1], local_dir=sys.argv[2])
+print("weights downloaded")
+PY
+    if python3 "$FLASHVSR_DIR/_dl_weights.py" "$HF_REPO" "$FLASHVSR_MODEL_DIR"; then
+        rm -f "$FLASHVSR_DIR/_dl_weights.py"
+    else
+        err "Weight download failed. Manual fallback:"
+        err "  git lfs install && git clone https://huggingface.co/$HF_REPO $FLASHVSR_MODEL_DIR"
+        exit 1
+    fi
+fi
+
+# Guard: a mismatched huggingface_hub is the most common way this install ends up broken, because
+# several packages pin it and pip will happily satisfy the newest request. Check and repair.
+info "Checking dependency consistency..."
+if ! pip check >/dev/null 2>&1; then
+    warn "pip reports dependency conflicts:"
+    pip check 2>&1 | sed 's/^/    /' || true
+    HUB_PIN="$(python3 -c "import importlib.metadata as m; print(m.requires('diffsynth'))" 2>/dev/null \
+               | tr ',' '\n' | grep -oE 'huggingface-hub==[0-9.]+' | head -1 | cut -d= -f3)"
+    if [[ -n "$HUB_PIN" ]]; then
+        info "Repairing huggingface_hub to diffsynth's pin (==${HUB_PIN})..."
+        pip install "huggingface_hub==${HUB_PIN}" && ok "huggingface_hub pinned to ${HUB_PIN}"
+    fi
 fi
 
 # ── Quality patch ────────────────────────────────────────────────────────────
@@ -144,9 +172,17 @@ if torch.cuda.is_available():
 PY
 
 info "Verifying the CLI loads..."
-python3 "$FLASHVSR_CLI" --help >/dev/null 2>&1 \
-    && ok "infer.py responds to --help" \
-    || warn "infer.py --help failed — check the install before running a real job."
+if python3 "$FLASHVSR_CLI" --help >/dev/null 2>&1; then
+    ok "infer.py responds to --help"
+else
+    err "infer.py --help FAILED — the install is not usable yet. Actual error:"
+    # Show the real failure rather than swallowing it; the import traceback names the culprit.
+    python3 "$FLASHVSR_CLI" --help 2>&1 | tail -20 | sed 's/^/    /'
+    echo ""
+    err "Most common cause: a package pin was overwritten (often huggingface_hub, which diffsynth"
+    err "pins to ==0.34.4). Check with:  source $FLASHVSR_VENV/bin/activate && pip check"
+    exit 1
+fi
 
 echo ""
 ok "Setup complete. Runtime lives under $FLASHVSR_DIR (separate from the main + SeedVR2 venvs)."
