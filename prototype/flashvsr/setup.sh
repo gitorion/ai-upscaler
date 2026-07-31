@@ -155,9 +155,22 @@ fi
 # resolved against the CWD, and ignores FLASHVSR-Pro_MODEL_PATH (which only covers the DiT).
 # upscale_video.sh runs infer.py from the repo dir, so this symlink makes that path resolve to the
 # shared weights tree — which stays outside the repo so a re-clone never re-downloads 7GB.
+# The repo ships its own models/ tree, so this path may already exist as a REAL directory. A plain
+# `ln -sfn` would then fail (or nest the link inside it), so link at whichever granularity is safe.
+LINK_DIR="$FLASHVSR_REPO/models/FlashVSR-v1.1"
 mkdir -p "$FLASHVSR_REPO/models"
-ln -sfn "$FLASHVSR_MODEL_DIR" "$FLASHVSR_REPO/models/FlashVSR-v1.1"
-ok "Linked models/FlashVSR-v1.1 → $FLASHVSR_MODEL_DIR"
+if [[ -L "$LINK_DIR" || ! -e "$LINK_DIR" ]]; then
+    ln -sfn "$FLASHVSR_MODEL_DIR" "$LINK_DIR"
+    ok "Linked models/FlashVSR-v1.1 → $FLASHVSR_MODEL_DIR"
+else
+    n=0
+    for f in "$FLASHVSR_MODEL_DIR"/*; do
+        [[ -f "$f" ]] || continue
+        b=$(basename "$f")
+        [[ -e "$LINK_DIR/$b" ]] || { ln -sfn "$f" "$LINK_DIR/$b"; n=$((n + 1)); }
+    done
+    ok "models/FlashVSR-v1.1 already exists — populated it with ${n} weight symlink(s)"
+fi
 
 for f in Wan2.1_VAE.pth TCDecoder.ckpt LQ_proj_in.ckpt diffusion_pytorch_model_streaming_dmd.safetensors; do
     if [[ -f "$FLASHVSR_REPO/models/FlashVSR-v1.1/$f" ]]; then

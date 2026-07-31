@@ -1718,10 +1718,36 @@ flashvsr_infer() {
     #     and resolves it against the CWD, ignoring that variable entirely.
     # So we run from the repo and point that relative path at our shared weights dir with a
     # symlink. Keeping the weights outside the repo means a re-clone never re-downloads 7GB.
-    mkdir -p "$FLASHVSR_REPO/models"
-    if [[ ! -e "$FLASHVSR_REPO/models/FlashVSR-v1.1" ]]; then
-        ln -sfn "$FLASHVSR_MODEL_DIR" "$FLASHVSR_REPO/models/FlashVSR-v1.1"
-        print_info "Linked $FLASHVSR_REPO/models/FlashVSR-v1.1 → $FLASHVSR_MODEL_DIR"
+    # The repo ships its own models/ tree, so that path may ALREADY exist (as a real, possibly
+    # empty, directory). Testing existence is therefore not enough — we test whether the weights
+    # are actually reachable through it, and link at whichever granularity is safe:
+    #   * path absent, or already our symlink  -> one directory symlink
+    #   * a real directory shipped by the repo -> per-file symlinks into it (destroys nothing)
+    local link_dir="$FLASHVSR_REPO/models/FlashVSR-v1.1"
+    local need="Wan2.1_VAE.pth"
+    [[ "$FLASHVSR_MODE" != "full" ]] && need="TCDecoder.ckpt"
+
+    if [[ ! -f "$link_dir/$need" ]]; then
+        mkdir -p "$FLASHVSR_REPO/models"
+        if [[ -L "$link_dir" || ! -e "$link_dir" ]]; then
+            ln -sfn "$FLASHVSR_MODEL_DIR" "$link_dir"
+            print_info "Linked $link_dir → $FLASHVSR_MODEL_DIR"
+        else
+            local n=0 f base
+            for f in "$FLASHVSR_MODEL_DIR"/*; do
+                [[ -f "$f" ]] || continue
+                base=$(basename "$f")
+                [[ -e "$link_dir/$base" ]] || { ln -sfn "$f" "$link_dir/$base"; n=$((n + 1)); }
+            done
+            print_info "Populated existing $link_dir with ${n} weight symlink(s) → $FLASHVSR_MODEL_DIR"
+        fi
+    fi
+
+    if [[ ! -f "$link_dir/$need" ]]; then
+        print_error "FlashVSR weights still unreachable: $link_dir/$need"
+        print_error "Expected the real file at: $FLASHVSR_MODEL_DIR/$need"
+        ls -l "$FLASHVSR_MODEL_DIR" 2>/dev/null | head -12
+        exit 1
     fi
 
     # Absolutise the paths: we cd into the repo below, so a relative -i/-o would break.
