@@ -337,7 +337,8 @@ Performance / quality (single-frame models):
   --full-precision          Use float32 instead of float16 (auto for hat/nomos8kdat)
 
 Temporal model options:
-  --temporal-window N       Sliding window size in frames (default: auto — probes GPU)
+  --temporal-window N       Sliding window size in frames (default: auto — probes GPU,
+                            searching down from TEMPORAL_WINDOW_MAX, default 31)
 
 Workflow:
   --resume                  Skip already-completed frames from an interrupted run
@@ -448,6 +449,16 @@ Controls the x265 encoder preset. This affects the final encode step only — it
 | `fast` | fast | ~4x faster | Noticeably faster, slightly larger files at same CRF |
 
 For a 97-minute 1080p 60fps encode, `slow` takes ~9 hours on an 8-thread CPU. Switch to `medium` or `fast` when encode time matters more than squeezing out maximum quality per byte.
+
+## Tuning principle
+
+Every auto-tuned setting in this pipeline follows the same order of priority:
+
+1. **Quality first.** Start from the highest-quality configuration and only step down when the hardware genuinely cannot take it. Full-frame (untiled) processing is tried before any tiling; the largest temporal window / batch size is tried before smaller ones.
+2. **Then use the resources you have.** Probe the actual GPU rather than assuming a safe default. A bigger card should automatically do better work, with no hand-tuning.
+3. **Speed is the beneficiary, not the goal.** It is often aligned with the above — a larger temporal window means fewer passes, and a larger tile means fewer tiles — but where they conflict, quality wins. Lossless speed optimisations (`torch.compile`, attention backends, block swapping) are always on because they cost nothing in output fidelity.
+
+Concretely: `-t/--tile` probes `full-frame → largest tile that fits`, `--temporal-window` searches down from `TEMPORAL_WINDOW_MAX` (31), and `SEEDVR2_BATCH=auto` binary-searches the largest batch that fits and caches it. Where a setting trades quality for VRAM, the recovery path always exhausts the quality-neutral levers first — for SeedVR2 that means raising `blocks_to_swap` (speed cost only, bit-identical output) before ever reducing batch size.
 
 ## Pipeline
 

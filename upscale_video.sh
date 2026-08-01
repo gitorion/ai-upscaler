@@ -59,6 +59,8 @@ IS_TEMPORAL=false
 IS_SEEDVR2=false
 IS_FLASHVSR=false
 TEMPORAL_WINDOW="auto"
+# Ceiling for the auto temporal-window search (quality lever for basicvsr; also speeds it up).
+TEMPORAL_WINDOW_MAX="${TEMPORAL_WINDOW_MAX:-31}"
 SPYNET_PATH=""
 
 # ── SeedVR2 settings (tuned for RTX 4060 Ti 16GB) ─────────────────────────────
@@ -350,7 +352,10 @@ Performance / quality (single-frame models only):
 Temporal model options:
   --temporal-window N       Sliding window size in frames [default: auto]
                             Auto mode probes GPU VRAM and selects the largest window
-                            that fits (max 15). Override with an explicit value.
+                            that fits, searching down from TEMPORAL_WINDOW_MAX (default 31).
+                            Bigger windows = more temporal propagation AND fewer passes,
+                            so this improves quality and speed together.
+                            Override with an explicit value.
 
 Workflow:
   --resume                  Resume interrupted run — skip already-completed frames
@@ -883,7 +888,15 @@ def tile_process(model, img_tensor, model_scale, tile_size, tile_pad):
 
 def probe_tile_size(model, model_scale, src_h, src_w, tile_pad, device, use_half):
     """Try descending tile sizes on a dummy frame to find the largest that fits in VRAM."""
-    candidates = [0, 768, 512, 384, 256, 192, 128]
+    # Quality first: full-frame (0) has no seams at all, so it is always tried first. Only when it
+    # does not fit do we tile, and then we want the LARGEST tile that fits — fewer seams, fewer
+    # passes. Sizes at or above the frame's long edge are skipped: they are just full-frame with
+    # extra padding, which we have already tried.
+    long_edge = max(src_h, src_w)
+    candidates = [0] + [t for t in [2048, 1536, 1024, 768, 512, 384, 256, 192, 128]
+                        if t < long_edge]
+    if len(candidates) == 1:            # tiny source — tiling can never beat full-frame
+        candidates.append(128)
 
     dtype = torch.float16 if use_half else torch.float32
     dummy = torch.rand(1, 3, src_h, src_w, dtype=dtype, device=device)
@@ -1147,6 +1160,12 @@ import importlib
 # MUST be set before torch is imported.
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
+# Ceiling for the auto window search. Larger windows give BasicVSR++ more frames to propagate
+# information across (the quality lever) and mean fewer windows overall (so also faster). The probe
+# starts here and walks down to whatever actually fits in VRAM. Kept moderate by default because
+# pushing far past the sequence lengths the model was trained on stops buying quality.
+TEMPORAL_WINDOW_MAX = int(os.environ.get('TEMPORAL_WINDOW_MAX', '31'))
+
 import cv2
 import torch
 import numpy as np
@@ -1304,7 +1323,12 @@ def tensor_to_frame(t):
 
 def probe_window_size(model, window_size, src_h, src_w, device, use_half):
     """Try descending window sizes on dummy frames to find the largest that fits in VRAM."""
-    candidates = [s for s in [window_size, 13, 11, 9, 7, 5, 3] if s <= window_size]
+    # Descending odd window sizes from the requested ceiling. A larger window means more temporal
+    # propagation (the quality lever) AND fewer windows overall (so it is also faster) — the probe
+    # is a single forward pass on dummy data, so searching a wide ladder costs little.
+    candidates = [s for s in range(int(window_size), 2, -2) if s >= 3]
+    if not candidates:
+        candidates = [3]
     # Deduplicate while preserving order
     seen = set()
     candidates = [s for s in candidates if not (s in seen or seen.add(s))]
@@ -1389,7 +1413,7 @@ def upscale_temporal(input_video, frames_dir, model_key, model_path, spynet_path
 
     # Auto-probe optimal window size if requested
     if window_size < 0:
-        window_size = probe_window_size(model, 15, src_h, src_w, device, use_half)
+        window_size = probe_window_size(model, TEMPORAL_WINDOW_MAX, src_h, src_w, device, use_half)
     print(f"Window size: {window_size}", flush=True)
 
     # ── Sliding-window parameters ────────────────────────────────────────────
@@ -1577,6 +1601,7 @@ upscale_video() {
         [[ "$TEMPORAL_WINDOW" == "auto" ]] && win_note="auto (probing GPU)"
         print_info "Model: $MODEL_KEY  |  Window: ${win_note}  |  Prefilter: ${PREFILTER}"
 
+        TEMPORAL_WINDOW_MAX="$TEMPORAL_WINDOW_MAX" \
         "$VENV_DIR/bin/python3" "$TEMP_DIR/upscale_temporal.py" \
             "$UPSCALE_SOURCE" \
             "$frames_dir" \
