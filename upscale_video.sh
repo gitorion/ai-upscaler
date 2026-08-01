@@ -75,6 +75,11 @@ SEEDVR2_BATCH_MAX="${SEEDVR2_BATCH_MAX:-49}"    # ceiling for that search (49 = 
                             # spanning a scene cut makes the model reconcile two different scenes.
                             # On 16GB you top out ~1-1.5s of context anyway, well under a shot.
 SEEDVR2_BATCH_FALLBACK="${SEEDVR2_BATCH_FALLBACK:-21}"   # used if calibration can't run
+# Notches to back off from what the probe says fits. The probe is a few seconds long, so it runs
+# fewer batches than a real chunk AND never sees the fragmentation that builds across chunks.
+# Measured: probe said 41; 41 OOM'd on chunk 1 batch 5, and 37 OOM'd on chunk 2 batch 4. Two notches
+# is the empirical margin. The cache self-corrects to whatever survives a full run anyway.
+SEEDVR2_BATCH_MARGIN_STEPS="${SEEDVR2_BATCH_MARGIN_STEPS:-2}"
                             # frames/batch (MUST be 4n+1: 1,5,9,13,17,21,25...).
                             # This is the single most important knob for motion quality. Each batch
                             # generates its detail independently, so the batch length IS the window
@@ -236,6 +241,21 @@ print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 # True if ffprobe can read the file as valid media — used to skip corrupt extracted
 # audio/subtitle streams so a bad stream can't kill the final mux.
 probe_ok() { ffprobe -v error -i "$1" -show_entries format=duration -of csv=p=0 >/dev/null 2>&1; }
+
+# True only if $2 is a COMPLETE upscale of $1 — readable, and covering at least 95% of the input's
+# duration. Existence is NOT enough: these CLIs stream their output chunk by chunk, so a mid-run
+# crash leaves a short but perfectly valid file on disk. Treating that as success silently ships a
+# clip with a few seconds of video and a full-length audio track.
+vsr_output_complete() {
+    local in_file="$1" out_file="$2"
+    [[ -f "$out_file" ]] || return 1
+    probe_ok "$out_file" || return 1
+    local d_in d_out
+    d_in=$(ffprobe  -v error -show_entries format=duration -of csv=p=0 "$in_file"  2>/dev/null | head -1)
+    d_out=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$out_file" 2>/dev/null | head -1)
+    [[ -z "$d_in" || -z "$d_out" ]] && return 1
+    awk -v a="$d_in" -v b="$d_out" 'BEGIN { exit !(a > 0 && b >= a * 0.95) }'
+}
 
 usage() {
     cat << EOF
@@ -1623,7 +1643,11 @@ seedvr2_infer() {
     [[ "$SEEDVR2_COMPILE_VAE" == true ]] && speed_opts+=(--compile_vae)
 
     mkdir -p "$SEEDVR2_MODEL_DIR"
-    "$SEEDVR2_VENV/bin/python3" "$SEEDVR2_CLI" \
+    # expandable_segments reduces allocator fragmentation. It matters here because VRAM pressure
+    # builds ACROSS chunks in one process — observed chunk 1 succeeding and chunk 2 OOMing at the
+    # same batch size.
+    env PYTORCH_CUDA_ALLOC_CONF="${SEEDVR2_ALLOC_CONF:-expandable_segments:True}" \
+        "$SEEDVR2_VENV/bin/python3" "$SEEDVR2_CLI" \
         "$in_video" \
         --output "$out_video" \
         --output_format mp4 \
@@ -1705,9 +1729,12 @@ seedvr2_calibrate_batch() {
     # VRAM use creeps up ACROSS batches. Measured: batch 41 probed fine, then OOM'd on batch 5 of 6
     # in the real chunk. A probe therefore reports an optimistic ceiling, and one notch of margin is
     # much cheaper than discovering it mid-run (a wasted phase-1 pass plus a model reload).
-    local best="$probed"
-    if [[ "$best_n" -gt 1 ]]; then
-        best=$(seedvr2_prev_batch "$probed")
+    local best="$probed" i
+    for (( i = 0; i < SEEDVR2_BATCH_MARGIN_STEPS; i++ )); do
+        [[ "$best" -le 5 ]] && break
+        best=$(seedvr2_prev_batch "$best")
+    done
+    if [[ "$best" != "$probed" ]]; then
         print_info "SeedVR2: probe ceiling ${probed}; using ${best} for margin (short probes under-report steady-state VRAM)" >&2
     fi
 
@@ -1756,8 +1783,12 @@ seedvr2_infer_retry() {
 
     while true; do
         print_info "SeedVR2: batch ${batch}, blocks_to_swap ${swap}"
-        if seedvr2_infer "$in_video" "$out_video" "$batch" "$swap" 2>&1 | tee "$errlog"; then :; fi
-        if [[ -f "$out_video" ]]; then
+        rm -f "$out_video"
+        seedvr2_infer "$in_video" "$out_video" "$batch" "$swap" 2>&1 | tee "$errlog"
+        local rc=${PIPESTATUS[0]}
+        # A partial file is NOT success — these CLIs stream output, so a crash mid-run still
+        # leaves a short, readable clip behind. Require the full duration.
+        if [[ "$rc" -eq 0 ]] && vsr_output_complete "$in_video" "$out_video"; then
             rm -f "$errlog"
             SEEDVR2_FIT_BATCH="$batch"; SEEDVR2_FIT_SWAP="$swap"
             # Correct the cache to what SURVIVED a real run. The probe only sees a few batches;
@@ -1771,7 +1802,11 @@ seedvr2_infer_retry() {
             return 0
         fi
 
-        if ! grep -qiE "out of memory|OutOfMemoryError" "$errlog" 2>/dev/null; then
+        if [[ -f "$out_video" ]]; then
+            print_warning "Discarding incomplete output from the failed attempt."
+            rm -f "$out_video"
+        fi
+        if ! grep -qiE "out of memory|OutOfMemoryError|Allocation on device" "$errlog" 2>/dev/null; then
             print_error "SeedVR2 failed (not a VRAM error) — see output above."
             rm -f "$errlog"
             return 1
@@ -1985,11 +2020,16 @@ flashvsr_infer_retry() {
     local in_video="$1" out_video="$2" depth="${3:-0}" tile_dit="${4:-$FLASHVSR_TILE_DIT}"
     local errlog="${out_video}.err"
 
-    if flashvsr_infer "$in_video" "$out_video" "$tile_dit" 2>&1 | tee "$errlog"; then
-        # tee masks the exit status; treat a produced file as success.
-        [[ -f "$out_video" ]] && { rm -f "$errlog"; return 0; }
+    rm -f "$out_video"
+    flashvsr_infer "$in_video" "$out_video" "$tile_dit" 2>&1 | tee "$errlog"
+    local rc=${PIPESTATUS[0]}
+    if [[ "$rc" -eq 0 ]] && vsr_output_complete "$in_video" "$out_video"; then
+        rm -f "$errlog"; return 0
     fi
-    [[ -f "$out_video" ]] && { rm -f "$errlog"; return 0; }
+    if [[ -f "$out_video" ]]; then
+        print_warning "Discarding incomplete output from the failed attempt."
+        rm -f "$out_video"
+    fi
 
     if ! grep -qiE "out of memory|OutOfMemoryError|CUDA error: out of memory" "$errlog" 2>/dev/null; then
         print_error "FlashVSR failed (not a VRAM error) — see output above."
@@ -2213,8 +2253,13 @@ vsr_segmented() {
             continue
         fi
         print_info "Segment ${i}/${total}: upscaling $(basename "$seg")..."
-        "$infer_fn" "$seg" "$part"
-        [[ -f "$part" ]] || { print_error "Segment ${i} produced no output — see errors above."; exit 1; }
+        if ! "$infer_fn" "$seg" "$part"; then
+            print_error "Segment ${i} failed — see errors above."; exit 1
+        fi
+        if ! vsr_output_complete "$seg" "$part"; then
+            print_error "Segment ${i} output is incomplete (truncated or unreadable) — refusing to continue."
+            rm -f "$part"; exit 1
+        fi
         mv -f "$part" "$out"   # atomic: only a complete segment counts as done
         done_count=$((done_count + 1))
     done
