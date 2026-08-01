@@ -1657,6 +1657,7 @@ seedvr2_infer() {
 seedvr2_calibrate_batch() {
     local feed="$1" swap="$2"
     local cache="$SEEDVR2_DIR/batch_fit_${OUTPUT_HEIGHT}p_swap${swap}.txt"
+    SEEDVR2_BATCH_CACHE="$cache"
 
     if [[ -s "$cache" ]]; then
         local cached; cached=$(cat "$cache")
@@ -1697,10 +1698,22 @@ seedvr2_calibrate_batch() {
         echo "$SEEDVR2_BATCH_FALLBACK"; return 0
     fi
 
-    local best=$(( 4 * best_n + 1 ))
+    local probed=$(( 4 * best_n + 1 ))
+
+    # SAFETY MARGIN — step down one notch from what probed OK.
+    # The probe is a few seconds long, so it runs far fewer batches per chunk than the real job, and
+    # VRAM use creeps up ACROSS batches. Measured: batch 41 probed fine, then OOM'd on batch 5 of 6
+    # in the real chunk. A probe therefore reports an optimistic ceiling, and one notch of margin is
+    # much cheaper than discovering it mid-run (a wasted phase-1 pass plus a model reload).
+    local best="$probed"
+    if [[ "$best_n" -gt 1 ]]; then
+        best=$(seedvr2_prev_batch "$probed")
+        print_info "SeedVR2: probe ceiling ${probed}; using ${best} for margin (short probes under-report steady-state VRAM)" >&2
+    fi
+
     mkdir -p "$SEEDVR2_DIR"
     echo "$best" > "$cache" 2>/dev/null || true
-    print_success "SeedVR2: calibrated max batch = ${best} (~$(awk -v b="$best" 'BEGIN{printf "%.2f", b/25}')s of temporal context), cached" >&2
+    print_success "SeedVR2: calibrated batch = ${best} (~$(awk -v b="$best" 'BEGIN{printf "%.2f", b/25}')s of temporal context), cached" >&2
     echo "$best"
 }
 
@@ -1729,6 +1742,7 @@ seedvr2_prev_batch() {
 # failed attempt.
 SEEDVR2_FIT_BATCH=""
 SEEDVR2_FIT_SWAP=""
+SEEDVR2_BATCH_CACHE=""
 seedvr2_infer_retry() {
     local in_video="$1" out_video="$2"
     local swap="${SEEDVR2_FIT_SWAP:-$SEEDVR2_BLOCKS_SWAP}"
@@ -1746,6 +1760,14 @@ seedvr2_infer_retry() {
         if [[ -f "$out_video" ]]; then
             rm -f "$errlog"
             SEEDVR2_FIT_BATCH="$batch"; SEEDVR2_FIT_SWAP="$swap"
+            # Correct the cache to what SURVIVED a real run. The probe only sees a few batches;
+            # this value has been through a full chunk, so it is the more trustworthy number.
+            if [[ -n "$SEEDVR2_BATCH_CACHE" && -f "$SEEDVR2_BATCH_CACHE" ]]; then
+                if [[ "$(cat "$SEEDVR2_BATCH_CACHE" 2>/dev/null)" != "$batch" ]]; then
+                    echo "$batch" > "$SEEDVR2_BATCH_CACHE" 2>/dev/null \
+                        && print_info "SeedVR2: cache corrected to the batch that actually ran (${batch})"
+                fi
+            fi
             return 0
         fi
 
@@ -2636,6 +2658,18 @@ if [[ -z "$OUTPUT_FILE" ]]; then
     BASENAME=$(basename "$INPUT_FILE" | sed 's/\.[^.]*$//')
     INPUT_PARENT=$(cd "$(dirname "$INPUT_FILE")" && pwd)
     OUTPUT_FILE="$INPUT_PARENT/${BASENAME}_upscaled_${RESOLUTION}.mkv"
+fi
+
+# Create the output's parent directory NOW, not at the final mux. A missing -o directory would
+# otherwise kill a multi-hour run at the very last step, after all the compute is done.
+OUTPUT_PARENT="$(dirname "$OUTPUT_FILE")"
+if [[ ! -d "$OUTPUT_PARENT" ]]; then
+    mkdir -p "$OUTPUT_PARENT" || { print_error "Cannot create output directory: $OUTPUT_PARENT"; exit 1; }
+    print_info "Created output directory: $OUTPUT_PARENT"
+fi
+if [[ ! -w "$OUTPUT_PARENT" ]]; then
+    print_error "Output directory is not writable: $OUTPUT_PARENT"
+    exit 1
 fi
 
 mkdir -p "$TEMP_DIR"
